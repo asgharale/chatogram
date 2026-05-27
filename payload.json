@@ -1,0 +1,40 @@
+{
+    "message": {
+        "text": "asghar salam",
+        "message_id" : 12381780,
+        "from": {
+            "id": 969231957,
+            "is_bot": false,
+            "FirstName": "asghar",
+            "LastName": "ale",
+            "username": "asghar83",
+            "language_code": "fa"
+        },
+        "chat": {
+            "id": 969231957
+        }
+    }
+}
+{
+    "callback_query": {
+        "id": 969231957,
+        "data": "man_gender",
+        "message": {
+            "text": "asghar salam",
+            "message_id" : 12381780,
+            "from": {
+                "id": 969231957,
+                "is_bot": false,
+                "FirstName": "asghar",
+                "LastName": "ale",
+                "username": "asghar83",
+                "language_code": "fa"
+            },
+            "chat": {
+                "id": 969231957
+            }
+    
+        }
+
+    }
+}
