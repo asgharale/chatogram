@@ -42,7 +42,9 @@ REPLY_KB_COMMANDS = {
     "🎂 هم‌سن‌ها":  "get_related_ages",
     "🎭 چت ناشناس": "start_new_chat",
     "👛 کیف پول":   "show_wallet",
-    "📸 پروفایل":   "set_profile_pic",
+    # FIX 1: was "set_profile_pic" (immediately asked for photo upload).
+    # Now maps to "view_profile" so the button shows the profile card first.
+    "📸 پروفایل":   "view_profile",
 }
 
 
@@ -104,7 +106,6 @@ class BaleBotWebhook(APIView):
 
         if message:
             if text and text.startswith("/start"):
-                # Parse optional referral code: "/start REF_CODE"
                 parts    = text.strip().split(maxsplit=1)
                 ref_code = parts[1].strip() if len(parts) > 1 else None
                 self.handle_start(user, chat_id, created, ref_code=ref_code)
@@ -113,12 +114,12 @@ class BaleBotWebhook(APIView):
             if contact:
                 self.handle_contact(user, chat_id, contact)
                 return Response({"ok": True})
-    
 
-            # Photo message — handle before the support gate so receipt
-            # uploads work even without membership (edge case protection)
+            # FIX 3: Photo messages were handled inline here with undefined
+            # `tomans` / `coins` variables, causing a NameError crash before
+            # the receipt flow ever ran.  Delegate to handle_photo_message
+            # which correctly reads the awaiting_receipt_* state from cache.
             if photo:
-                file_id = photo[-1].get("file_id") if isinstance(photo[-1], dict) else None
                 if not self.bot.is_joined_supporteds(chat_id):
                     send_key_message_task.delay(
                         chat_id=chat_id,
@@ -126,26 +127,9 @@ class BaleBotWebhook(APIView):
                         reply_markup=self.bot.get_supports_menu(),
                     )
                     return Response({"ok": True})
-                deposit = PendingDeposit.objects.create(
-                    user=user,
-                    amount_tomans=tomans,
-                    coins_to_add=coins,
-                    receipt_file_id=file_id,
-                )
-                admin_caption = (
-                    f"💰 درخواست شارژ جدید — #{deposit.id}\n"
-                    f"{'─' * 22}\n"
-                    f"👤 کاربر: {user.first_name or ''} {user.last_name or ''}\n"
-                    f"🆔 Bale ID: {chat_id}\n"
-                    f"💵 مبلغ: {tomans:,} تومان  →  {coins} سکه"
-                )
-                send_photo_caption_task.delay(
-                    chat_id=ASGHAR_BALE_ID,
-                    file_id=file_id,
-                    caption=admin_caption,
-                    reply_markup=self.bot.get_admin_deposit_menu(deposit.id),
-                )
+                self.handle_photo_message(user, chat_id, photo)
                 return Response({"ok": True})
+
             # Persistent reply-keyboard shortcuts
             if text in REPLY_KB_COMMANDS:
                 cb_data = REPLY_KB_COMMANDS[text]
@@ -173,7 +157,6 @@ class BaleBotWebhook(APIView):
                 "man_gender", "woman_gender", "unknown_gender",
                 "province_", "city_", "age_", "joined_supported",
             )
-            # Admin-only callbacks bypass the support-channel gate
             ADMIN_PREFIXES = ("deposit_approve_", "deposit_reject_")
 
             is_onboarding  = any(
@@ -210,10 +193,19 @@ class BaleBotWebhook(APIView):
                 self.handle_accept_chat(user, chat_id, cb_data)
             elif cb_data.startswith("reject_chat_"):
                 self.handle_reject_chat(user, chat_id, cb_data)
+            # FIX 2: "start_new_chat" now shows the gender-preference menu
+            # instead of immediately joining the generic queue.
             elif cb_data == "start_new_chat":
                 self.handle_anon_chat(user, chat_id)
-            elif cb_data == "cancel_anon_queue":
-                self.handle_cancel_anon_queue(user, chat_id)
+            # FIX 2: dispatch gender-preference callbacks to the new handler.
+            elif cb_data in ("anon_pref_boys", "anon_pref_girls", "anon_pref_any"):
+                pref = cb_data.replace("anon_pref_", "")   # "boys" | "girls" | "any"
+                self.handle_anon_chat_with_pref(user, chat_id, pref)
+            # FIX 2: cancel button now carries the pref so the right queue is cleared.
+            elif cb_data.startswith("cancel_anon_queue"):
+                parts = cb_data.split("_", 3)              # ["cancel","anon","queue","boys"]
+                pref  = parts[3] if len(parts) > 3 else "any"
+                self.handle_cancel_anon_queue(user, chat_id, pref)
             # ── Wallet ────────────────────────────────────────────────────────
             elif cb_data == "show_wallet":
                 self.handle_wallet(user, chat_id)
@@ -223,8 +215,11 @@ class BaleBotWebhook(APIView):
                 self.handle_wallet_history(user, chat_id)
             elif cb_data.startswith("topup_"):
                 self.handle_topup_amount(user, chat_id, cb_data)
-            # ── Profile picture ───────────────────────────────────────────────
-            elif cb_data == "set_profile_pic":
+            # FIX 1: "view_profile" shows the full profile card + edit buttons.
+            elif cb_data == "view_profile":
+                self.handle_view_profile(user, chat_id)
+            # "set_profile_pic" / "change_profile_pic" both lead to the upload prompt.
+            elif cb_data in ("set_profile_pic", "change_profile_pic"):
                 self.handle_set_profile_pic(user, chat_id)
             # ── Referral ──────────────────────────────────────────────────────
             elif cb_data == "show_referral":
@@ -261,7 +256,8 @@ class BaleBotWebhook(APIView):
                 [{"text": "🎭 شروع چت ناشناس", "callback_data": "start_new_chat"}],
                 [
                     {"text": "👛 کیف پول",  "callback_data": "show_wallet"},
-                    {"text": "📸 پروفایل",  "callback_data": "set_profile_pic"},
+                    # FIX 1: inline menu also updated to "view_profile"
+                    {"text": "📸 پروفایل",  "callback_data": "view_profile"},
                 ],
                 [{"text": "🔗 معرفی دوستان", "callback_data": "show_referral"}],
             ]
@@ -287,10 +283,13 @@ class BaleBotWebhook(APIView):
         card_text = self.bot.format_profile_card(profile_user, header)
 
         if profile_user.photo_file_id:
+            # FIX 1: reply_markup was silently dropped when a photo existed,
+            # so the edit/end-chat buttons never appeared alongside profile pics.
             send_photo_caption_task.delay(
                 chat_id=target_chat_id,
                 file_id=profile_user.photo_file_id,
                 caption=card_text,
+                reply_markup=reply_markup,
             )
         else:
             if reply_markup:
@@ -325,26 +324,16 @@ class BaleBotWebhook(APIView):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _attach_referrer(self, user, ref_code: str) -> None:
-        """
-        Link `user` to the owner of `ref_code` if valid and not self-referral.
-        Stores the code in cache so it survives the multi-step onboarding flow.
-        """
         if not ref_code or user.referred_by_id:
             return
-        # Stash in cache; the actual FK is set after profile completion
         cache.set(f"pending_referral_{user.bale_id}", ref_code, timeout=REFERRAL_CACHE_TTL)
 
     def _process_referral_reward(self, user) -> None:
-        """
-        Called after the last onboarding step (age).
-        If the user was referred and profile is now complete, reward the referrer.
-        """
         if user.referral_rewarded:
             return
         if not user.has_complete_profile:
             return
 
-        # Try to resolve a pending referral code stored in cache
         if not user.referred_by_id:
             ref_code = cache.get(f"pending_referral_{user.bale_id}")
             if ref_code:
@@ -379,7 +368,6 @@ class BaleBotWebhook(APIView):
     # ══════════════════════════════════════════════════════════════════════════
 
     def handle_start(self, user, chat_id: int, created: bool, ref_code: str = None):
-        # ── Welcome gift for brand-new users ──────────────────────────────────
         if created:
             user.add_coins(WELCOME_COINS, "هدیه خوش‌آمد 🎁")
             send_message_task.delay(
@@ -389,7 +377,6 @@ class BaleBotWebhook(APIView):
                     f"این سکه‌ها رو برای چت با کاربرهای جدید استفاده کن 😊"
                 ),
             )
-            # Attach referral code for processing after profile completion
             if ref_code:
                 self._attach_referrer(user, ref_code)
 
@@ -487,8 +474,7 @@ class BaleBotWebhook(APIView):
             ),
         )
 
-        # ── Trigger referral reward if this user was invited ──────────────────
-        user.refresh_from_db()          # make sure we have the latest referred_by
+        user.refresh_from_db()
         self._process_referral_reward(user)
 
         if not self.bot.is_joined_supporteds(chat_id):
@@ -546,10 +532,33 @@ class BaleBotWebhook(APIView):
         )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Profile picture
+    # FIX 1 – Profile view
     # ══════════════════════════════════════════════════════════════════════════
 
+    def handle_view_profile(self, user, chat_id: int):
+        """
+        Show the user's own profile card (photo + details) with edit buttons.
+        Triggered by "📸 پروفایل" in both the reply keyboard and inline menu.
+        """
+        card   = BaleBotService.format_profile_card(user, header="📸 پروفایل من")
+        markup = self.bot.get_profile_menu()
+
+        if user.photo_file_id:
+            send_photo_caption_task.delay(
+                chat_id=chat_id,
+                file_id=user.photo_file_id,
+                caption=card,
+                reply_markup=markup,
+            )
+        else:
+            send_key_message_task.delay(
+                chat_id=chat_id,
+                text=card,
+                reply_markup=markup,
+            )
+
     def handle_set_profile_pic(self, user, chat_id: int):
+        """Ask the user to send a new profile picture."""
         cache.set(f"user_state_{chat_id}", "awaiting_profile_pic", timeout=USER_STATE_TTL)
         if user.photo_file_id:
             text = "📸 عکس پروفایل فعلی رو داری. یه عکس جدید بفرست تا جایگزین بشه."
@@ -558,29 +567,18 @@ class BaleBotWebhook(APIView):
         send_message_task.delay(chat_id=chat_id, text=text)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Photo message router
+    # FIX 3 – Photo message router
     # ══════════════════════════════════════════════════════════════════════════
 
     def handle_photo_message(self, user, chat_id: int, photo: list):
         """
-        Route incoming photo messages based on the user's current state:
-          - awaiting_profile_pic  → save as profile picture
-          - awaiting_receipt_*    → save deposit + notify admin with approve/reject buttons
-          - active chat           → forward to chat partner
-          - otherwise             → inform user
+        Route incoming photo messages based on the user's current cache state:
+          - awaiting_profile_pic   → save as profile picture
+          - awaiting_receipt_*     → create PendingDeposit + notify admin
+                                     with receipt photo and approve/reject buttons
+          - active chat session    → forward photo to chat partner
+          - otherwise              → inform user
         """
-        if photo:
-            if not self.bot.is_joined_supporteds(chat_id):
-                send_key_message_task.delay(
-                    chat_id=chat_id,
-                    text="لطفاً ابتدا در کانال‌های اسپانسر عضو شوید 🙏",
-                    reply_markup=self.bot.get_supports_menu(),
-                )
-                return Response({"ok": True})
-
-            self.handle_photo_message(user, chat_id, photo)
-            return Response({"ok": True})
-
         file_id = photo[-1].get("file_id") if isinstance(photo[-1], dict) else None
         if not file_id:
             send_message_task.delay(chat_id=chat_id, text="دریافت عکس با خطا مواجه شد ❗️")
@@ -623,20 +621,10 @@ class BaleBotWebhook(APIView):
                 ),
             )
 
-            # ── Notify admin with receipt photo + approve/reject buttons ──────
-            admin_caption = (
-                f"💰 درخواست شارژ جدید — #{deposit.id}\n"
-                f"{'─' * 22}\n"
-                f"👤 کاربر: {user.first_name or ''} {user.last_name or ''}\n"
-                f"🆔 Bale ID: {chat_id}\n"
-                f"💵 مبلغ: {tomans:,} تومان  →  {coins} سکه"
-            )
-            send_photo_caption_task.delay(
-                chat_id=ASGHAR_BALE_ID,
-                file_id=file_id,
-                caption=admin_caption,
-                reply_markup=self.bot.get_admin_deposit_menu(deposit.id),
-            )
+            # FIX 3: Send receipt photo + full user details + approve/reject
+            # buttons to admin.  Uses notify_admin_new_deposit which builds the
+            # rich caption (name, Bale ID, phone, gender, city, amount, coins).
+            self.bot.notify_admin_new_deposit(deposit, user, is_photo=True)
             return
 
         # ── Active chat — forward photo to partner ────────────────────────────
@@ -964,6 +952,7 @@ class BaleBotWebhook(APIView):
             target_chat_id=chat_id,
             profile_user=requester,
             header=start_msg,
+            reply_markup=end_menu,
         )
         send_key_message_task.delay(
             chat_id=chat_id,
@@ -975,6 +964,7 @@ class BaleBotWebhook(APIView):
             target_chat_id=requester.bale_id,
             profile_user=user,
             header=f"🎉 {user.first_name or 'کاربر'} درخواستت رو قبول کرد!\n{start_msg}",
+            reply_markup=end_menu,
         )
         send_key_message_task.delay(
             chat_id=requester.bale_id,
@@ -1019,27 +1009,60 @@ class BaleBotWebhook(APIView):
             self.send_main_menu(other.bale_id)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Anonymous chat  (7-min timeout + profile sharing + 8-coin cost)
+    # FIX 2 – Anonymous chat  (gender-preference entry point)
     # ══════════════════════════════════════════════════════════════════════════
 
     def handle_anon_chat(self, user, chat_id: int):
+        """
+        Show the gender-preference menu when the user taps 🎭 چت ناشناس.
+        Actual queue joining happens in handle_anon_chat_with_pref.
+        """
+        if self._get_active_session(user):
+            send_message_task.delay(
+                chat_id=chat_id, text="شما در حال حاضر در یک چت فعال هستید ❌"
+            )
+            return
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text="با چه جنسیتی می‌خوای چت کنی؟ 🎭",
+            reply_markup=self.bot.get_anon_gender_pref_menu(),
+        )
+
+    def handle_anon_chat_with_pref(self, user, chat_id: int, pref: str):
+        """
+        Join the gender-filtered anonymous chat queue and attempt to match.
+
+        pref: "boys" | "girls" | "any"
+
+        Queue semantics (defined in services.py):
+          QUEUE_KEY_BOYS  = users who WANT a male partner
+          QUEUE_KEY_GIRLS = users who WANT a female partner
+          QUEUE_KEY       = users who don't care (pref="any")
+
+        Matching: someone who wants boys is matched with someone who wants girls
+        (cross-preference pairing), so both parties get what they asked for.
+        """
         if self._get_active_session(user):
             send_message_task.delay(
                 chat_id=chat_id, text="شما در حال حاضر در یک چت فعال هستید ❌"
             )
             return
 
-        waiting_id = self.bot.pop_queued_user(chat_id)
+        # Try to match against the opposite queue
+        waiting_id = self.bot.pop_queued_user_for_pref(chat_id, user.gender or 2, pref)
 
         if waiting_id:
             try:
                 user2 = UserProfile.objects.get(bale_id=waiting_id)
             except UserProfile.DoesNotExist:
+                # Stale entry — fall through to re-queue
                 pass
             else:
+                # Coin check for both sides before committing
                 for u in (user, user2):
                     if u.get_wallet_balance() < CHAT_START_COST:
-                        self.bot.set_queued_user(waiting_id)
+                        # Put the waiting user back so they aren't lost
+                        self.bot.set_queued_user_for_pref(waiting_id, pref)
                         send_key_message_task.delay(
                             chat_id=u.bale_id,
                             text=(
@@ -1057,8 +1080,8 @@ class BaleBotWebhook(APIView):
                 user.deduct_coins(CHAT_START_COST, "چت ناشناس")
                 user2.deduct_coins(CHAT_START_COST, "چت ناشناس")
 
-                session   = ChatSession.objects.create(user1=user2, user2=user, status=1)
-                end_menu  = {"inline_keyboard": [[
+                session  = ChatSession.objects.create(user1=user2, user2=user, status=1)
+                end_menu = {"inline_keyboard": [[
                     {"text": "پایان چت ❌", "callback_data": f"reject_chat_{session.id}"}
                 ]]}
                 start_msg = (
@@ -1066,17 +1089,33 @@ class BaleBotWebhook(APIView):
                     "پروفایل طرف مقابل 👇"
                 )
 
-                self._send_profile_card(target_chat_id=chat_id, profile_user=user2, header=start_msg)
-                send_key_message_task.delay(chat_id=chat_id, text="پیام بفرست 💬", reply_markup=end_menu)
+                self._send_profile_card(
+                    target_chat_id=chat_id,
+                    profile_user=user2,
+                    header=start_msg,
+                    reply_markup=end_menu,
+                )
+                send_key_message_task.delay(
+                    chat_id=chat_id, text="پیام بفرست 💬", reply_markup=end_menu
+                )
 
-                self._send_profile_card(target_chat_id=waiting_id, profile_user=user, header=start_msg)
-                send_key_message_task.delay(chat_id=waiting_id, text="پیام بفرست 💬", reply_markup=end_menu)
+                self._send_profile_card(
+                    target_chat_id=waiting_id,
+                    profile_user=user,
+                    header=start_msg,
+                    reply_markup=end_menu,
+                )
+                send_key_message_task.delay(
+                    chat_id=waiting_id, text="پیام بفرست 💬", reply_markup=end_menu
+                )
                 return
 
-        if self.bot.get_queued_user() == chat_id:
+        # Already waiting in the same queue?
+        if self.bot.get_queued_user_for_pref(pref) == chat_id:
             send_message_task.delay(chat_id=chat_id, text="هنوز در صف هستی، صبر کن 🔍")
             return
 
+        # Coin check before joining queue
         if user.get_wallet_balance() < CHAT_START_COST:
             send_key_message_task.delay(
                 chat_id=chat_id,
@@ -1093,20 +1132,27 @@ class BaleBotWebhook(APIView):
             )
             return
 
-        self.bot.set_queued_user(chat_id)
-        anon_chat_timeout_task.apply_async(args=[chat_id], countdown=7 * 60)
+        self.bot.set_queued_user_for_pref(chat_id, pref)
+        # Pass pref so the timeout task clears the correct queue
+        anon_chat_timeout_task.apply_async(args=[chat_id, pref], countdown=7 * 60)
 
+        pref_label = {"boys": "👦 پسرها", "girls": "👧 دخترها"}.get(pref, "🎭 همه")
         send_key_message_task.delay(
             chat_id=chat_id,
-            text="🔍 در حال جستجو برای یک کاربر ناشناس...\nاگر تا ۷ دقیقه کسی پیدا نشد خودکار خارج می‌شی.",
+            text=(
+                f"🔍 در حال جستجو برای {pref_label}...\n"
+                "اگر تا ۷ دقیقه کسی پیدا نشد خودکار خارج می‌شی."
+            ),
             reply_markup={"inline_keyboard": [[
-                {"text": "لغو جستجو ❌", "callback_data": "cancel_anon_queue"}
+                # Carry pref in callback so cancel clears the right queue
+                {"text": "لغو جستجو ❌", "callback_data": f"cancel_anon_queue_{pref}"}
             ]]},
         )
 
-    def handle_cancel_anon_queue(self, user, chat_id: int):
-        if self.bot.get_queued_user() == chat_id:
-            self.bot.remove_queued_user()
+    def handle_cancel_anon_queue(self, user, chat_id: int, pref: str = "any"):
+        """Cancel an active queue entry for the given gender preference."""
+        if self.bot.get_queued_user_for_pref(pref) == chat_id:
+            self.bot.remove_queued_user_for_pref(pref)
             send_message_task.delay(chat_id=chat_id, text="جستجو لغو شد ✅")
         else:
             send_message_task.delay(chat_id=chat_id, text="شما در صف نبودید.")

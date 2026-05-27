@@ -310,10 +310,12 @@ class BaleBotService:
     # Profile view menu
     # ------------------------------------------------------------------
     def get_profile_menu(self) -> dict:
-        """Inline keyboard shown under the user's profile card."""
+        """Inline keyboard shown under the user's own profile card."""
         return {
             "inline_keyboard": [
-                [{"text": "✏️ ویرایش پروفایل", "callback_data": "edit_profile"}],
+                [{"text": "✏️ ویرایش پروفایل",     "callback_data": "edit_profile"}],
+                # FIX 1: exposes the photo-upload flow from the profile view
+                [{"text": "📷 تغییر عکس پروفایل", "callback_data": "change_profile_pic"}],
             ]
         }
 
