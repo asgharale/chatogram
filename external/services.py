@@ -8,8 +8,19 @@ from .models import SupportChannel
 import os
 
 SUPPORT_CACHE_TTL = 300
-QUEUE_KEY         = "anon_chat_queue"
+QUEUE_KEY         = "anon_chat_queue"          # legacy / "any" gender queue
 QUEUE_LOCK_KEY    = "anon_chat_queue_lock"
+
+# Keyed queues for gender-filtered anonymous chat
+# key = "anon_chat_queue_boys"  → waiting for a male partner
+# key = "anon_chat_queue_girls" → waiting for a female partner
+QUEUE_KEY_BOYS    = "anon_chat_queue_boys"
+QUEUE_KEY_GIRLS   = "anon_chat_queue_girls"
+QUEUE_LOCK_BOYS   = "anon_chat_queue_boys_lock"
+QUEUE_LOCK_GIRLS  = "anon_chat_queue_girls_lock"
+
+# Telegram/Bale chat-id of admin "Asghar" who reviews deposits
+ADMIN_CHAT_ID: int = int(os.environ.get("ADMIN_CHAT_ID", "0"))
 
 DEFAULT_TOPUP_PACKAGES = [
     {"tomans": 10_000, "coins": 50},
@@ -274,6 +285,157 @@ class BaleBotService:
                 }
             ]]
         }
+
+    # ------------------------------------------------------------------
+    # Anonymous chat – gender preference entry menu
+    # ------------------------------------------------------------------
+    def get_anon_gender_pref_menu(self) -> dict:
+        """
+        Shown when the user taps 🎭 چت ناشناس.
+        Lets them choose to chat with boys, girls, or anyone.
+        """
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "👦 فقط با پسرها",  "callback_data": "anon_pref_boys"},
+                    {"text": "👧 فقط با دخترها", "callback_data": "anon_pref_girls"},
+                ],
+                [
+                    {"text": "🎭 فرقی نمی‌کند",  "callback_data": "anon_pref_any"},
+                ],
+            ]
+        }
+
+    # ------------------------------------------------------------------
+    # Profile view menu
+    # ------------------------------------------------------------------
+    def get_profile_menu(self) -> dict:
+        """Inline keyboard shown under the user's profile card."""
+        return {
+            "inline_keyboard": [
+                [{"text": "✏️ ویرایش پروفایل", "callback_data": "edit_profile"}],
+            ]
+        }
+
+    # ------------------------------------------------------------------
+    # Admin deposit notification  (FIX: was missing – admin never saw receipt)
+    # ------------------------------------------------------------------
+    def notify_admin_new_deposit(self, deposit, user, is_photo: bool) -> None:
+        """
+        Forward the receipt (photo or document) with user details and
+        approve / reject inline buttons to the admin (Asghar).
+        Set ADMIN_CHAT_ID in your environment / Django settings.
+        """
+        if not ADMIN_CHAT_ID:
+            print("[BaleBot] ADMIN_CHAT_ID not configured – skipping admin notification")
+            return
+
+        caption = self._build_deposit_caption(deposit, user)
+        markup  = self.get_admin_deposit_menu(deposit.id)
+
+        if is_photo:
+            self.send_photo_caption(
+                chat_id=ADMIN_CHAT_ID,
+                file_id=deposit.receipt_file_id,
+                caption=caption,
+                reply_markup=markup,
+            )
+        else:
+            # document receipt
+            self.send(
+                "sendDocument",
+                {
+                    "chat_id":      ADMIN_CHAT_ID,
+                    "document":     deposit.receipt_file_id,
+                    "caption":      caption,
+                    "reply_markup": markup,
+                },
+            )
+
+    @staticmethod
+    def _build_deposit_caption(deposit, user) -> str:
+        from user.enums import GENDER_LABEL
+        gender_text = GENDER_LABEL.get(user.gender, "---")
+        city_text   = user.city.name     if user.city     else "---"
+        prov_text   = user.province.name if user.province else "---"
+        lines = [
+            "💳 درخواست شارژ کیف پول",
+            "─" * 20,
+            f"👤 نام: {(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip() or "---",
+            f"🆔 Bale ID: {user.bale_id}",
+            f"📱 شماره: {user.phone or '---'}",
+            f"🚻 جنسیت: {gender_text}",
+            f"🗺 استان: {prov_text}",
+            f"🏡 شهر: {city_text}",
+            "─" * 20,
+            f"💰 مبلغ: {deposit.amount_tomans:,} تومان",
+            f"🪙 سکه: {deposit.coins_to_add} سکه",
+            f"🔖 شناسه: #{deposit.id}",
+        ]
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Gender-filtered anonymous queue helpers
+    # ------------------------------------------------------------------
+    def get_queued_user_for_pref(self, pref: str):
+        """
+        pref: "boys" | "girls" | "any"
+        Returns the waiting chat_id whose gender matches what we need,
+        or falls back to the generic queue for "any".
+        """
+        key = {
+            "boys":  QUEUE_KEY_BOYS,
+            "girls": QUEUE_KEY_GIRLS,
+        }.get(pref, QUEUE_KEY)
+        return cache.get(key)
+
+    def set_queued_user_for_pref(self, bale_id: int, pref: str) -> bool:
+        """Add the user to the appropriate gender queue. Returns False if occupied."""
+        key = {
+            "boys":  QUEUE_KEY_BOYS,
+            "girls": QUEUE_KEY_GIRLS,
+        }.get(pref, QUEUE_KEY)
+        return bool(cache.add(key, bale_id, timeout=300))
+
+    def remove_queued_user_for_pref(self, pref: str):
+        key = {
+            "boys":  QUEUE_KEY_BOYS,
+            "girls": QUEUE_KEY_GIRLS,
+        }.get(pref, QUEUE_KEY)
+        cache.delete(key)
+
+    def pop_queued_user_for_pref(self, my_chat_id: int, my_gender: int, pref: str):
+        """
+        Attempt to match the current user against the queue.
+
+        Logic:
+        - pref == "boys"  → pull from QUEUE_KEY_GIRLS
+          (user wants to talk to a boy, so they themselves are in the girls queue
+           and we look in the boys queue for their match, or vice versa — see note)
+
+        NOTE: The queue key name reflects the SEEKER's preference, not their gender.
+              "anon_pref_boys" means "I want to chat with a boy", so we put this
+              user into QUEUE_KEY_BOYS (waiting for someone who wants boys) and
+              look for a partner in QUEUE_KEY_GIRLS (someone who wants girls).
+              For "any" we use the generic key on both sides.
+
+        Returns the matched partner's chat_id, or None.
+        """
+        partner_key, partner_lock = {
+            "boys":  (QUEUE_KEY_GIRLS,  QUEUE_LOCK_GIRLS),
+            "girls": (QUEUE_KEY_BOYS,   QUEUE_LOCK_BOYS),
+        }.get(pref, (QUEUE_KEY, QUEUE_LOCK_KEY))
+
+        if not cache.add(partner_lock, 1, timeout=5):
+            return None
+        try:
+            waiting = cache.get(partner_key)
+            if waiting is None or waiting == my_chat_id:
+                return None
+            cache.delete(partner_key)
+            return waiting
+        finally:
+            cache.delete(partner_lock)
 
     @staticmethod
     def format_profile_card(user, header: str = "👤 پروفایل کاربر") -> str:

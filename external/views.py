@@ -102,7 +102,6 @@ class BaleBotWebhook(APIView):
             if changed:
                 user.save()
 
-        # ── Handle message ────────────────────────────────────────────────────
         if message:
             if text and text.startswith("/start"):
                 # Parse optional referral code: "/start REF_CODE"
@@ -114,10 +113,12 @@ class BaleBotWebhook(APIView):
             if contact:
                 self.handle_contact(user, chat_id, contact)
                 return Response({"ok": True})
+    
 
             # Photo message — handle before the support gate so receipt
             # uploads work even without membership (edge case protection)
             if photo:
+                file_id = photo[-1].get("file_id") if isinstance(photo[-1], dict) else None
                 if not self.bot.is_joined_supporteds(chat_id):
                     send_key_message_task.delay(
                         chat_id=chat_id,
@@ -125,6 +126,19 @@ class BaleBotWebhook(APIView):
                         reply_markup=self.bot.get_supports_menu(),
                     )
                     return Response({"ok": True})
+                deposit = PendingDeposit.objects.create(
+                    user=user,
+                    amount_tomans=tomans,
+                    coins_to_add=coins,
+                    receipt_file_id=file_id,
+                )
+                admin_caption = (
+                    f"💰 درخواست شارژ جدید — #{deposit.id}\n"
+                    f"{'─' * 22}\n"
+                    f"👤 کاربر: {user.first_name or ''} {user.last_name or ''}\n"
+                    f"🆔 Bale ID: {chat_id}\n"
+                    f"💵 مبلغ: {tomans:,} تومان  →  {coins} سکه"
+                )
                 send_photo_caption_task.delay(
                     chat_id=ASGHAR_BALE_ID,
                     file_id=file_id,
@@ -132,7 +146,6 @@ class BaleBotWebhook(APIView):
                     reply_markup=self.bot.get_admin_deposit_menu(deposit.id),
                 )
                 return Response({"ok": True})
-
             # Persistent reply-keyboard shortcuts
             if text in REPLY_KB_COMMANDS:
                 cb_data = REPLY_KB_COMMANDS[text]

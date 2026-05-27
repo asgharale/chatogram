@@ -26,3 +26,8 @@ DEPOSIT_STATUS = (
     (1, "تأیید شده"),
     (2, "رد شده"),
 )
+
+# Anonymous chat partner-gender preference
+ANON_CHAT_PREF_ANY   = "any"
+ANON_CHAT_PREF_BOYS  = "boys"   # callback: anon_pref_boys
+ANON_CHAT_PREF_GIRLS = "girls"  # callback: anon_pref_girls
