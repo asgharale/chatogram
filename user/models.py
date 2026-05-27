@@ -1,7 +1,13 @@
+import uuid
 from django.db import models
 from django.utils import timezone
 from config.models import BaseModel, Document, City, Province
 from .enums import GENDER, TRANSACTION_TYPE, DEPOSIT_STATUS
+
+
+def _generate_referral_code() -> str:
+    """8-char uppercase alphanumeric code, collision-safe via unique=True."""
+    return uuid.uuid4().hex[:8].upper()
 
 
 class UserProfile(BaseModel):
@@ -20,17 +26,43 @@ class UserProfile(BaseModel):
     national_code    = models.CharField(max_length=14, blank=True, null=True)
     phone            = models.CharField(max_length=15, blank=True, null=True)
 
+    # ── Referral system ───────────────────────────────────────────────────────
+    referral_code    = models.CharField(max_length=16, unique=True, blank=True, null=True)
+    referred_by      = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='referrals',
+    )
+    # Set to True once the referrer receives their 5 000-coin reward for this user
+    referral_rewarded = models.BooleanField(default=False)
+
     class Meta:
         db_table = 'UserProfiles'
         indexes = [
             models.Index(fields=['city']),
             models.Index(fields=['age']),
+            models.Index(fields=['referral_code']),
         ]
 
     def __str__(self):
         return f"{self.bale_id} - {self.username}"
 
+    # ------------------------------------------------------------------
+    # Auto-generate a unique referral code on first save
+    # ------------------------------------------------------------------
+    def save(self, *args, **kwargs):
+        if not self.referral_code:
+            code = _generate_referral_code()
+            # Retry on the tiny chance of a collision
+            while UserProfile.objects.filter(referral_code=code).exists():
+                code = _generate_referral_code()
+            self.referral_code = code
+        super().save(*args, **kwargs)
 
+    # ------------------------------------------------------------------
+    # Wallet helpers
+    # ------------------------------------------------------------------
     def _wallet(self) -> "Wallet":
         wallet, _ = Wallet.objects.get_or_create(user=self)
         return wallet
@@ -65,6 +97,18 @@ class UserProfile(BaseModel):
             amount=amount,
             type=0,
             description=description,
+        )
+
+    # ------------------------------------------------------------------
+    # Profile completeness check (used by referral reward logic)
+    # ------------------------------------------------------------------
+    @property
+    def has_complete_profile(self) -> bool:
+        return bool(
+            self.gender is not None
+            and self.province_id
+            and self.city_id
+            and self.age
         )
 
 

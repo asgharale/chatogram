@@ -16,8 +16,13 @@ DEFAULT_TOPUP_PACKAGES = [
     {"tomans": 50_000, "coins": 320},
 ]
 
-CHAT_REQUEST_COST = 2
-CHAT_START_COST   = 8
+CHAT_REQUEST_COST  = 2
+CHAT_START_COST    = 8
+WELCOME_COINS      = 30    # Free coins given on first /start
+REFERRAL_REWARD    = 5_000  # Coins given to referrer when invitee completes profile
+
+# ─── Bot username (used in referral deep-links) ───────────────────────────────
+BOT_USERNAME = getattr(settings, "BALE_BOT_USERNAME", "YourBotUsername")
 
 
 class BaleBotService:
@@ -168,6 +173,8 @@ class BaleBotService:
         finally:
             cache.delete(QUEUE_LOCK_KEY)
 
+    # ── Menu builders ─────────────────────────────────────────────────────────
+
     def get_province_menu(self):
         kb, row = {"inline_keyboard": []}, []
         for p in Province.objects.all():
@@ -220,8 +227,9 @@ class BaleBotService:
     def get_wallet_menu(self):
         return {
             "inline_keyboard": [
-                [{"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}],
-                [{"text": "📋 تاریخچه تراکنش‌ها", "callback_data": "wallet_history"}],
+                [{"text": "💳 شارژ کیف پول",        "callback_data": "wallet_topup"}],
+                [{"text": "📋 تاریخچه تراکنش‌ها",   "callback_data": "wallet_history"}],
+                [{"text": "🔗 کد معرفی من",          "callback_data": "show_referral"}],
             ]
         }
 
@@ -236,6 +244,26 @@ class BaleBotService:
             }])
         kb["inline_keyboard"].append([{"text": "🔙 بازگشت", "callback_data": "show_wallet"}])
         return kb
+
+    def get_admin_deposit_menu(self, deposit_id: int) -> dict:
+        """Inline buttons sent to admin alongside a receipt photo."""
+        return {
+            "inline_keyboard": [[
+                {"text": "✅ تأیید پرداخت",  "callback_data": f"deposit_approve_{deposit_id}"},
+                {"text": "❌ رد پرداخت",     "callback_data": f"deposit_reject_{deposit_id}"},
+            ]]
+        }
+
+    def get_referral_menu(self, referral_code: str) -> dict:
+        """Share + copy panel for the user's referral code."""
+        return {
+            "inline_keyboard": [[
+                {
+                    "text": "📤 اشتراک‌گذاری لینک",
+                    "url": f"https://ble.ir/{BOT_USERNAME}?start={referral_code}",
+                }
+            ]]
+        }
 
     @staticmethod
     def format_profile_card(user, header: str = "👤 پروفایل کاربر") -> str:
