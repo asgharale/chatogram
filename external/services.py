@@ -22,7 +22,7 @@ CHAT_START_COST    = 8
 WELCOME_COINS      = 30
 REFERRAL_REWARD    = 5_000
 
-BOT_USERNAME = os.getenv("BOT_USERNAME")
+BOT_USERNAME = "alochatbot"
 
 
 class BaleBotService:
