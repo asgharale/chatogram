@@ -10,22 +10,18 @@ SUPPORT_CACHE_TTL = 300
 QUEUE_KEY         = "anon_chat_queue"
 QUEUE_LOCK_KEY    = "anon_chat_queue_lock"
 
-# ── Top-up packages (tomans → coins) ─────────────────────────────────────────
-# Override in settings.TOPUP_PACKAGES if needed.
 DEFAULT_TOPUP_PACKAGES = [
     {"tomans": 10_000, "coins": 50},
     {"tomans": 20_000, "coins": 120},
     {"tomans": 50_000, "coins": 320},
 ]
 
-# ── Coin costs ────────────────────────────────────────────────────────────────
-CHAT_REQUEST_COST = 2   # sending a direct chat request
-CHAT_START_COST   = 8   # when a session actually begins (both users pay)
+CHAT_REQUEST_COST = 2
+CHAT_START_COST   = 8
 
 
 class BaleBotService:
 
-    # ── Persistent bottom keyboard ────────────────────────────────────────────
     main_reply_keyboard = {
         "keyboard": [
             [
@@ -82,8 +78,6 @@ class BaleBotService:
         session.mount("http://",  adapter)
         return session
 
-    # ── Low-level HTTP ────────────────────────────────────────────────────────
-
     def send(self, endpoint: str, payload: dict):
         url = f"{self.base_url}{endpoint}"
         try:
@@ -124,8 +118,6 @@ class BaleBotService:
     def get_chat_member(self, channel_id, user_id):
         return self.send("getChatMember", {"chat_id": channel_id, "user_id": user_id})
 
-    # ── Support-channel membership ────────────────────────────────────────────
-
     def _raw_check_joined(self, chat_id: int) -> bool:
         allowed = {"creator", "administrator", "member"}
         try:
@@ -155,8 +147,6 @@ class BaleBotService:
     def invalidate_support_cache(self, chat_id: int):
         cache.delete(f"support_joined_{chat_id}")
 
-    # ── Anon-chat queue ───────────────────────────────────────────────────────
-
     def get_queued_user(self):
         return cache.get(QUEUE_KEY)
 
@@ -177,8 +167,6 @@ class BaleBotService:
             return waiting
         finally:
             cache.delete(QUEUE_LOCK_KEY)
-
-    # ── Keyboard builders ─────────────────────────────────────────────────────
 
     def get_province_menu(self):
         kb, row = {"inline_keyboard": []}, []
@@ -248,8 +236,6 @@ class BaleBotService:
             }])
         kb["inline_keyboard"].append([{"text": "🔙 بازگشت", "callback_data": "show_wallet"}])
         return kb
-
-    # ── Profile card ──────────────────────────────────────────────────────────
 
     @staticmethod
     def format_profile_card(user, header: str = "👤 پروفایل کاربر") -> str:

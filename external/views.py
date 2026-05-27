@@ -543,8 +543,8 @@ class BaleBotWebhook(APIView):
             send_message_task.delay(chat_id=chat_id, text="خطا در انتخاب بسته ❗️")
             return
 
-        card_number = getattr(settings, "PAYMENT_CARD_NUMBER", "----")
-        card_owner  = getattr(settings, "PAYMENT_CARD_OWNER", "صاحب حساب")
+        card_number = getattr(settings, "PAYMENT_CARD_NUMBER", "6219861415879450")
+        card_owner  = getattr(settings, "PAYMENT_CARD_OWNER", "محمد جهانی")
 
         text = (
             f"💳 شارژ کیف پول\n\n"
