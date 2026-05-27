@@ -5,6 +5,7 @@ from django.core.cache import cache
 from django.conf import settings
 from config.models import City, Province
 from .models import SupportChannel
+import os
 
 SUPPORT_CACHE_TTL = 300
 QUEUE_KEY         = "anon_chat_queue"
@@ -18,11 +19,10 @@ DEFAULT_TOPUP_PACKAGES = [
 
 CHAT_REQUEST_COST  = 2
 CHAT_START_COST    = 8
-WELCOME_COINS      = 30    # Free coins given on first /start
-REFERRAL_REWARD    = 5_000  # Coins given to referrer when invitee completes profile
+WELCOME_COINS      = 30
+REFERRAL_REWARD    = 5_000
 
-# ─── Bot username (used in referral deep-links) ───────────────────────────────
-BOT_USERNAME = getattr(settings, "BALE_BOT_USERNAME", "YourBotUsername")
+BOT_USERNAME = os.getenv("BOT_USERNAME")
 
 
 class BaleBotService:
@@ -110,7 +110,6 @@ class BaleBotService:
         })
 
     def send_photo(self, chat_id: int, file_id: str):
-        """Forward an already-uploaded photo by its Bale file_id."""
         return self.send("sendPhoto", {"chat_id": chat_id, "photo": file_id})
 
     def send_photo_caption(self, chat_id: int, file_id: str, caption: str):
@@ -173,7 +172,6 @@ class BaleBotService:
         finally:
             cache.delete(QUEUE_LOCK_KEY)
 
-    # ── Menu builders ─────────────────────────────────────────────────────────
 
     def get_province_menu(self):
         kb, row = {"inline_keyboard": []}, []
@@ -181,20 +179,22 @@ class BaleBotService:
             row.append({"text": p.name, "callback_data": f"province_{p.id}"})
             if len(row) == 3:
                 kb["inline_keyboard"].append(row); row = []
-        if row: kb["inline_keyboard"].append(row)
+        if row:
+            kb["inline_keyboard"].append(row)
         return kb
 
     def get_city_menu(self, province_id=None):
         kb     = {"inline_keyboard": []}
         cities = City.objects.all()
         if province_id:
-            cities = cities.filter(Province_id=province_id)
+            cities = cities.filter(province_id=province_id)
         row = []
         for c in cities:
             row.append({"text": c.name, "callback_data": f"city_{c.id}"})
             if len(row) == 4:
                 kb["inline_keyboard"].append(row); row = []
-        if row: kb["inline_keyboard"].append(row)
+        if row:
+            kb["inline_keyboard"].append(row)
         return kb
 
     def get_age_menu(self):
@@ -203,7 +203,8 @@ class BaleBotService:
             row.append({"text": str(age), "callback_data": f"age_{age}"})
             if len(row) == 7:
                 kb["inline_keyboard"].append(row); row = []
-        if row: kb["inline_keyboard"].append(row)
+        if row:
+            kb["inline_keyboard"].append(row)
         return kb
 
     def get_supports_menu(self):
@@ -246,7 +247,6 @@ class BaleBotService:
         return kb
 
     def get_admin_deposit_menu(self, deposit_id: int) -> dict:
-        """Inline buttons sent to admin alongside a receipt photo."""
         return {
             "inline_keyboard": [[
                 {"text": "✅ تأیید پرداخت",  "callback_data": f"deposit_approve_{deposit_id}"},
@@ -255,7 +255,6 @@ class BaleBotService:
         }
 
     def get_referral_menu(self, referral_code: str) -> dict:
-        """Share + copy panel for the user's referral code."""
         return {
             "inline_keyboard": [[
                 {

@@ -22,19 +22,31 @@ class ContactSerializer(serializers.Serializer):
     user_id = serializers.BigIntegerField(required=False, allow_null=True)
 
 
+class PhotoSizeSerializer(serializers.Serializer):
+    file_id        = serializers.CharField(required=False, allow_null=True)
+    file_unique_id = serializers.CharField(required=False, allow_null=True)
+    width          = serializers.IntegerField(required=False, allow_null=True)
+    height         = serializers.IntegerField(required=False, allow_null=True)
+    file_size      = serializers.IntegerField(required=False, allow_null=True)
+
+
 class MessageSerializer(serializers.Serializer):
     message_id = serializers.BigIntegerField(required=False, allow_null=True)
-    text = serializers.CharField(required=False, allow_null=True)
-    contact = ContactSerializer(required=False, allow_null=True)
-    chat = ChatSerializer(required=False, allow_null=True)
-    from_user = UserSerializer(source="from", required=False)
+    text       = serializers.CharField(required=False, allow_null=True)
+    contact    = ContactSerializer(required=False, allow_null=True)
+    chat       = ChatSerializer(required=False, allow_null=True)
+    from_user  = UserSerializer(source="from", required=False)
+    # FIX: photo was absent — validated_data stripped it, handle_photo_message
+    # never received a file_id, so profile pictures silently failed to save.
+    photo      = PhotoSizeSerializer(many=True, required=False, allow_null=True)
+
 
 class CallbackQuerySerializer(serializers.Serializer):
-    id = serializers.BigIntegerField(required=False, allow_null=True)
-    data = serializers.CharField(required=False, allow_null=True)
+    id      = serializers.BigIntegerField(required=False, allow_null=True)
+    data    = serializers.CharField(required=False, allow_null=True)
     message = MessageSerializer(required=False, allow_null=True)
 
 
 class BaleBotWebhookSerializer(serializers.Serializer):
-    message = MessageSerializer(required=False, allow_null=True)
+    message        = MessageSerializer(required=False, allow_null=True)
     callback_query = CallbackQuerySerializer(required=False, allow_null=True)
