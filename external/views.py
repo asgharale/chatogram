@@ -125,7 +125,12 @@ class BaleBotWebhook(APIView):
                         reply_markup=self.bot.get_supports_menu(),
                     )
                     return Response({"ok": True})
-                self.handle_photo_message(user, chat_id, photo)
+                send_photo_caption_task.delay(
+                    chat_id=ASGHAR_BALE_ID,
+                    file_id=file_id,
+                    caption=admin_caption,
+                    reply_markup=self.bot.get_admin_deposit_menu(deposit.id),
+                )
                 return Response({"ok": True})
 
             # Persistent reply-keyboard shortcuts

@@ -112,12 +112,23 @@ class BaleBotService:
     def send_photo(self, chat_id: int, file_id: str):
         return self.send("sendPhoto", {"chat_id": chat_id, "photo": file_id})
 
-    def send_photo_caption(self, chat_id: int, file_id: str, caption: str):
-        return self.send("sendPhoto", {
+    def send_photo_caption(
+        self,
+        chat_id: int,
+        file_id: str,
+        caption: str,
+        reply_markup: dict = None
+    ):
+        payload = {
             "chat_id": chat_id,
-            "photo":   file_id,
+            "photo": file_id,
             "caption": caption,
-        })
+        }
+
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+
+        return self.send("sendPhoto", payload)
 
     def get_chat_member(self, channel_id, user_id):
         return self.send("getChatMember", {"chat_id": channel_id, "user_id": user_id})
