@@ -10,6 +10,18 @@ SUPPORT_CACHE_TTL = 300
 QUEUE_KEY         = "anon_chat_queue"
 QUEUE_LOCK_KEY    = "anon_chat_queue_lock"
 
+# ── Top-up packages (tomans → coins) ─────────────────────────────────────────
+# Override in settings.TOPUP_PACKAGES if needed.
+DEFAULT_TOPUP_PACKAGES = [
+    {"tomans": 10_000, "coins": 50},
+    {"tomans": 20_000, "coins": 120},
+    {"tomans": 50_000, "coins": 320},
+]
+
+# ── Coin costs ────────────────────────────────────────────────────────────────
+CHAT_REQUEST_COST = 2   # sending a direct chat request
+CHAT_START_COST   = 8   # when a session actually begins (both users pay)
+
 
 class BaleBotService:
 
@@ -22,6 +34,10 @@ class BaleBotService:
             ],
             [
                 {"text": "🎭 چت ناشناس"},
+            ],
+            [
+                {"text": "👛 کیف پول"},
+                {"text": "📸 پروفایل"},
             ],
         ],
         "resize_keyboard": True,
@@ -44,9 +60,6 @@ class BaleBotService:
         ]
     }
 
-    # (connect_timeout, read_timeout)
-    # connect_timeout covers DNS + TCP. Keep it short so a broken DNS
-    # fails fast and lets Celery retry instead of blocking a worker for 28s.
     TIMEOUT = (4, 8)
 
     def __init__(self):
@@ -56,11 +69,6 @@ class BaleBotService:
 
     @staticmethod
     def _make_session() -> requests.Session:
-        """
-        urllib3-level retry for HTTP error codes (5xx, 429).
-        DNS / connection errors are NOT retried here — they propagate as
-        None from send(), and Celery handles the retry with back-off.
-        """
         session = requests.Session()
         retry = Retry(
             total=2,
@@ -77,10 +85,6 @@ class BaleBotService:
     # ── Low-level HTTP ────────────────────────────────────────────────────────
 
     def send(self, endpoint: str, payload: dict):
-        """
-        Returns the parsed JSON on success, or None on any network/HTTP error.
-        Returning None signals the Celery task to schedule a retry.
-        """
         url = f"{self.base_url}{endpoint}"
         try:
             resp = self.session.post(url, json=payload, timeout=self.TIMEOUT)
@@ -104,6 +108,17 @@ class BaleBotService:
             "chat_id":      chat_id,
             "text":         text,
             "reply_markup": reply_markup,
+        })
+
+    def send_photo(self, chat_id: int, file_id: str):
+        """Forward an already-uploaded photo by its Bale file_id."""
+        return self.send("sendPhoto", {"chat_id": chat_id, "photo": file_id})
+
+    def send_photo_caption(self, chat_id: int, file_id: str, caption: str):
+        return self.send("sendPhoto", {
+            "chat_id": chat_id,
+            "photo":   file_id,
+            "caption": caption,
         })
 
     def get_chat_member(self, channel_id, user_id):
@@ -213,3 +228,42 @@ class BaleBotService:
             accept_btn = {"text": "قبول ✅", "callback_data": f"accept_chat_{session.id}"}
             kb["inline_keyboard"].insert(0, [accept_btn])
         return kb
+
+    def get_wallet_menu(self):
+        return {
+            "inline_keyboard": [
+                [{"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}],
+                [{"text": "📋 تاریخچه تراکنش‌ها", "callback_data": "wallet_history"}],
+            ]
+        }
+
+    def get_topup_menu(self):
+        packages = getattr(settings, "TOPUP_PACKAGES", DEFAULT_TOPUP_PACKAGES)
+        kb = {"inline_keyboard": []}
+        for pkg in packages:
+            label = f"💰 {pkg['tomans']:,} تومان ← {pkg['coins']} سکه"
+            kb["inline_keyboard"].append([{
+                "text": label,
+                "callback_data": f"topup_{pkg['tomans']}_{pkg['coins']}",
+            }])
+        kb["inline_keyboard"].append([{"text": "🔙 بازگشت", "callback_data": "show_wallet"}])
+        return kb
+
+    # ── Profile card ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def format_profile_card(user, header: str = "👤 پروفایل کاربر") -> str:
+        from user.enums import GENDER_LABEL
+        gender_text = GENDER_LABEL.get(user.gender, "---")
+        city_text   = user.city.name     if user.city     else "---"
+        prov_text   = user.province.name if user.province else "---"
+        lines = [
+            header,
+            "─" * 20,
+            f"👤 نام: {user.first_name or '---'} {user.last_name or ''}".strip(),
+            f"🎂 سن: {user.age or '---'}",
+            f"🚻 جنسیت: {gender_text}",
+            f"🗺 استان: {prov_text}",
+            f"🏡 شهر: {city_text}",
+        ]
+        return "\n".join(lines)
