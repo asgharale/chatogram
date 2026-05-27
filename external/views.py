@@ -556,8 +556,17 @@ class BaleBotWebhook(APIView):
           - active chat           → forward to chat partner
           - otherwise             → inform user
         """
-        if not photo:
-            return
+        if photo:
+            if not self.bot.is_joined_supporteds(chat_id):
+                send_key_message_task.delay(
+                    chat_id=chat_id,
+                    text="لطفاً ابتدا در کانال‌های اسپانسر عضو شوید 🙏",
+                    reply_markup=self.bot.get_supports_menu(),
+                )
+                return Response({"ok": True})
+
+            self.handle_photo_message(user, chat_id, photo)
+            return Response({"ok": True})
 
         file_id = photo[-1].get("file_id") if isinstance(photo[-1], dict) else None
         if not file_id:
@@ -613,10 +622,6 @@ class BaleBotWebhook(APIView):
                 chat_id=ASGHAR_BALE_ID,
                 file_id=file_id,
                 caption=admin_caption,
-            )
-            send_key_message_task.delay(
-                chat_id=ASGHAR_BALE_ID,
-                text=f"برای پردازش درخواست #{deposit.id} دکمه بزن 👇",
                 reply_markup=self.bot.get_admin_deposit_menu(deposit.id),
             )
             return
