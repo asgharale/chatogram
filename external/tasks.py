@@ -1,40 +1,172 @@
 from __future__ import absolute_import, unicode_literals
+
+import logging
+
 from celery import shared_task
 from django.core.cache import cache
+
+logger = logging.getLogger(__name__)
 
 ANON_QUEUE_TIMEOUT = 7 * 60
 
 
-# ──────────────────────────────────────────────
-# Basic messaging tasks
-# ──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Core webhook processor
+# ═══════════════════════════════════════════════════════════════════════════════
 
-@shared_task(bind=True, max_retries=4, default_retry_delay=5)
+@shared_task(
+    bind=True,
+    queue="fast",
+    max_retries=2,
+    default_retry_delay=3,
+    name="external.tasks.process_webhook_task",
+)
+def process_webhook_task(self, raw_data: dict):
+    """
+    The single entry-point for ALL bot logic.
+    Runs entirely in Celery — the HTTP handler never touches business logic.
+
+    Steps:
+      1. Re-validate the payload.
+      2. Upsert the UserProfile.
+      3. Dispatch to BotHandlers.
+    """
+    from .serializers import BaleBotWebhookSerializer
+    from .services import BaleBotService
+    from .handlers import BotHandlers
+    from user.models import UserProfile
+
+    # ── 1. Validate ────────────────────────────────────────────────────────────
+    serializer = BaleBotWebhookSerializer(data=raw_data)
+    if not serializer.is_valid():
+        logger.error("process_webhook: invalid payload %s", raw_data)
+        return
+
+    data     = serializer.validated_data
+    message  = data.get("message")
+    callback = data.get("callback_query")
+
+    if not message and not callback:
+        return
+
+    # ── 2. Extract common fields ───────────────────────────────────────────────
+    if message:
+        chat      = message.get("chat") or {}
+        chat_id   = chat.get("id")
+        text      = message.get("text")
+        contact   = message.get("contact")
+        photo     = message.get("photo")
+        cb_data   = None
+        from_user = message.get("from_user") or chat
+    else:
+        msg       = callback.get("message") or {}
+        chat      = msg.get("chat") or {}
+        chat_id   = chat.get("id")
+        cb_data   = callback.get("data")
+        text      = None
+        contact   = None
+        photo     = None
+        from_user = callback.get("from_user") or msg.get("chat") or {}
+
+    if not chat_id:
+        logger.warning("process_webhook: missing chat_id — skipping")
+        return
+
+    first_name = from_user.get("first_name")
+    last_name  = from_user.get("last_name")
+    username   = from_user.get("username")
+
+    # ── 3. Upsert UserProfile ──────────────────────────────────────────────────
+    user, created = UserProfile.objects.get_or_create(
+        bale_id=chat_id,
+        defaults={
+            "first_name": first_name,
+            "last_name":  last_name,
+            "username":   username,
+        },
+    )
+
+    if not created:
+        changed_fields = []
+        for field, val in [
+            ("first_name", first_name),
+            ("last_name",  last_name),
+            ("username",   username),
+        ]:
+            if val and getattr(user, field) != val:
+                setattr(user, field, val)
+                changed_fields.append(field)
+        if changed_fields:
+            user.save(update_fields=changed_fields)
+
+    # ── 4. Dispatch ────────────────────────────────────────────────────────────
+    bot      = BaleBotService()
+    handlers = BotHandlers(bot)
+
+    # /start is special — needs the `created` flag
+    if text and text.startswith("/start"):
+        parts    = text.strip().split(maxsplit=1)
+        ref_code = parts[1].strip() if len(parts) > 1 else None
+        handlers.handle_start(user, chat_id, created=created, ref_code=ref_code)
+        return
+
+    try:
+        handlers.dispatch(user, chat_id, text, contact, photo, cb_data)
+    except Exception as exc:
+        logger.exception("process_webhook: unhandled error for chat_id=%s", chat_id)
+        raise self.retry(exc=exc, countdown=5)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Messaging — FAST queue
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@shared_task(
+    bind=True,
+    queue="fast",
+    max_retries=4,
+    default_retry_delay=5,
+    name="external.tasks.send_message_task",
+)
 def send_message_task(self, chat_id: int, text: str):
     from .services import BaleBotService
-    result = BaleBotService().send_message(chat_id, text)
-    if result is None:
+    if BaleBotService().send_message(chat_id, text) is None:
         raise self.retry(countdown=5 * (2 ** self.request.retries))
 
 
-@shared_task(bind=True, max_retries=4, default_retry_delay=5)
+@shared_task(
+    bind=True,
+    queue="fast",
+    max_retries=4,
+    default_retry_delay=5,
+    name="external.tasks.send_key_message_task",
+)
 def send_key_message_task(self, chat_id: int, text: str, reply_markup: dict):
     from .services import BaleBotService
-    result = BaleBotService().send_key_message(chat_id, text, reply_markup)
-    if result is None:
+    if BaleBotService().send_key_message(chat_id, text, reply_markup) is None:
         raise self.retry(countdown=5 * (2 ** self.request.retries))
 
 
-@shared_task(bind=True, max_retries=4, default_retry_delay=5)
+@shared_task(
+    bind=True,
+    queue="fast",
+    max_retries=4,
+    default_retry_delay=5,
+    name="external.tasks.send_photo_task",
+)
 def send_photo_task(self, chat_id: int, file_id: str):
-    """Send a photo by Bale file_id (e.g. forwarding profile pics)."""
     from .services import BaleBotService
-    result = BaleBotService().send_photo(chat_id, file_id)
-    if result is None:
+    if BaleBotService().send_photo(chat_id, file_id) is None:
         raise self.retry(countdown=5 * (2 ** self.request.retries))
 
 
-@shared_task(bind=True, max_retries=4, default_retry_delay=5)
+@shared_task(
+    bind=True,
+    queue="fast",
+    max_retries=4,
+    default_retry_delay=5,
+    name="external.tasks.send_photo_caption_task",
+)
 def send_photo_caption_task(
     self,
     chat_id: int,
@@ -43,179 +175,113 @@ def send_photo_caption_task(
     reply_markup: dict = None,
 ):
     from .services import BaleBotService
-    result = BaleBotService().send_photo_caption(chat_id, file_id, caption, reply_markup)
-    if result is None:
+    if BaleBotService().send_photo_caption(chat_id, file_id, caption, reply_markup) is None:
         raise self.retry(countdown=5 * (2 ** self.request.retries))
 
 
-# ──────────────────────────────────────────────
-# Support channel gate
-# ──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Support channel gate — SLOW queue
+# ═══════════════════════════════════════════════════════════════════════════════
 
-@shared_task(bind=True, max_retries=3, default_retry_delay=3)
-def send_support_gate(self, chat_id: int):
-    from .services import BaleBotService
-    bot    = BaleBotService()
-    result = bot.send_key_message(
-        chat_id=chat_id,
-        text="لطفاً ابتدا در کانال‌های زیر عضو شوید 🙏",
-        reply_markup=bot.get_supports_menu(),
-    )
-    if result is None:
-        raise self.retry(countdown=3 * (2 ** self.request.retries))
-
-
-@shared_task
-def check_support_channels(chat_id: int):
+@shared_task(
+    bind=True,
+    queue="slow",
+    max_retries=3,
+    default_retry_delay=3,
+    name="external.tasks.check_joined_and_respond_task",
+)
+def check_joined_and_respond_task(self, chat_id: int):
+    """
+    Called when user taps '✅ عضو شدم'.
+    Checks membership via Bale API (can be slow), then responds.
+    Runs in SLOW queue so it never blocks user-facing messages.
+    """
     from .services import BaleBotService, SUPPORT_CACHE_TTL
-    bot    = BaleBotService()
-    result = bot._raw_check_joined(chat_id)
-    cache.set(f"support_joined_{chat_id}", 1 if result else 0, timeout=SUPPORT_CACHE_TTL)
-    return result
-
-
-# ──────────────────────────────────────────────
-# Profile view task  (Feature 1)
-# ──────────────────────────────────────────────
-
-@shared_task(bind=True, max_retries=3, default_retry_delay=3)
-def send_profile_task(self, chat_id: int):
-    """
-    Send the user's own profile: photo (if any) + detail card + edit button.
-    Triggered when the user taps 📸 پروفایل in the main menu.
-    """
-    from .services import BaleBotService
-    from user.models import UserProfile
 
     bot = BaleBotService()
 
-    try:
-        user = UserProfile.objects.get(bale_id=chat_id)
-    except UserProfile.DoesNotExist:
-        bot.send_message(chat_id, "❌ پروفایل شما یافت نشد.")
-        return
+    # Force a fresh check — wipe any stale cache first
+    bot.invalidate_support_cache(chat_id)
+    joined = bot._raw_check_joined(chat_id)
 
-    card   = BaleBotService.format_profile_card(user, header="📸 پروفایل من")
-    markup = bot.get_profile_menu()
+    # Write fresh result to cache
+    cache.set(f"support_joined_{chat_id}", 1 if joined else 0, timeout=SUPPORT_CACHE_TTL)
 
-    if user.photo_file_id:
-        result = bot.send_photo_caption(
-            chat_id=chat_id,
-            file_id=user.photo_file_id,
-            caption=card,
-            reply_markup=markup,
+    if not joined:
+        bot.send_key_message(
+            chat_id,
+            "هنوز در همه کانال‌ها عضو نشدی 🙏 لطفاً عضو بشو و دوباره بزن.",
+            bot.get_supports_menu(),
         )
     else:
-        result = bot.send_key_message(
-            chat_id=chat_id,
-            text=card,
-            reply_markup=markup,
-        )
-
-    if result is None:
-        raise self.retry(countdown=3 * (2 ** self.request.retries))
+        bot.send_message(chat_id, "✅ عضویتت تأیید شد! ممنون 🙏")
+        bot.send_key_message(chat_id, "از منوی زیر استفاده کن 🙂", bot.main_reply_keyboard)
 
 
-# ──────────────────────────────────────────────
-# Deposit admin notification  (Feature 2 – bug fix)
-# ──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Admin deposit notification — SLOW queue
+# ═══════════════════════════════════════════════════════════════════════════════
 
-@shared_task(bind=True, max_retries=3, default_retry_delay=3)
+@shared_task(
+    bind=True,
+    queue="slow",
+    max_retries=3,
+    default_retry_delay=3,
+    name="external.tasks.notify_admin_deposit_task",
+)
 def notify_admin_deposit_task(self, deposit_id: int, is_photo: bool):
-    """
-    Send the deposit receipt + user details to admin (Asghar) with
-    approve / reject inline buttons.
-
-    Call this immediately after creating a PendingDeposit:
-        notify_admin_deposit_task.delay(deposit.id, is_photo=True/False)
-    """
     from .services import BaleBotService
     from user.models import PendingDeposit
 
     try:
-        deposit = PendingDeposit.objects.select_related("user__city", "user__province").get(pk=deposit_id)
+        deposit = (
+            PendingDeposit.objects
+            .select_related("user__city", "user__province")
+            .get(pk=deposit_id)
+        )
     except PendingDeposit.DoesNotExist:
-        return
-
-    bot    = BaleBotService()
-    result = bot.notify_admin_new_deposit(deposit, deposit.user, is_photo=is_photo)
-
-    # notify_admin_new_deposit returns None silently if ADMIN_CHAT_ID is unset;
-    # only retry on an actual send failure (result is explicitly None from send()).
-    if result is None and bot.send("getMe", {}) is None:
-        raise self.retry(countdown=3 * (2 ** self.request.retries))
-
-
-@shared_task(bind=True, max_retries=2, default_retry_delay=3)
-def notify_user_deposit_approved_task(self, chat_id: int, coins: int, tomans: int):
-    from .services import BaleBotService
-    bot    = BaleBotService()
-    result = bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"✅ پرداخت شما تأیید شد!\n"
-            f"💰 مبلغ: {tomans:,} تومان\n"
-            f"🪙 {coins} سکه به کیف پول شما افزوده شد."
-        ),
-    )
-    if result is None:
-        raise self.retry(countdown=3 * (2 ** self.request.retries))
-
-
-@shared_task(bind=True, max_retries=2, default_retry_delay=3)
-def notify_user_deposit_rejected_task(self, chat_id: int, tomans: int):
-    from .services import BaleBotService
-    bot    = BaleBotService()
-    result = bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"❌ متأسفانه پرداخت {tomans:,} تومانی شما تأیید نشد.\n"
-            "در صورت نیاز با پشتیبانی تماس بگیرید."
-        ),
-    )
-    if result is None:
-        raise self.retry(countdown=3 * (2 ** self.request.retries))
-
-
-# ──────────────────────────────────────────────
-# Anonymous chat queue timeout  (Feature 3 – gender-aware)
-# ──────────────────────────────────────────────
-
-@shared_task
-def anon_chat_timeout_task(chat_id: int, pref: str = "any"):
-    """
-    Scheduled 7 minutes after a user joins the anon queue.
-    If they're still waiting, remove them from the correct gender queue,
-    refund coins, and notify them.
-
-    pref: "boys" | "girls" | "any"
-    """
-    from .services import BaleBotService, QUEUE_KEY, QUEUE_KEY_BOYS, QUEUE_KEY_GIRLS
-
-    pref_key = {
-        "boys":  QUEUE_KEY_BOYS,
-        "girls": QUEUE_KEY_GIRLS,
-    }.get(pref, QUEUE_KEY)
-
-    waiting = cache.get(pref_key)
-    if waiting != chat_id:
-        # Already matched — nothing to do
+        logger.warning("notify_admin_deposit_task: deposit #%s not found", deposit_id)
         return
 
     bot = BaleBotService()
-    bot.remove_queued_user_for_pref(pref)
+    bot.notify_admin_new_deposit(deposit, deposit.user, is_photo=is_photo)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Anonymous chat queue timeout — SLOW queue
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@shared_task(
+    queue="slow",
+    name="external.tasks.anon_chat_timeout_task",
+)
+def anon_chat_timeout_task(chat_id: int, pref: str = "any"):
+    """
+    Fires 7 minutes after a user joins the anon queue.
+    If they are still waiting: remove them, refund coins, notify.
+    """
+    from .services import BaleBotService
+
+    bot = BaleBotService()
+
+    # Check if user is still in queue
+    if not bot.is_in_queue(chat_id, pref):
+        return   # Already matched — nothing to do
+
+    bot.remove_from_queue(chat_id, pref)
+
+    # Refund
     try:
         from user.models import UserProfile
         user = UserProfile.objects.get(bale_id=chat_id)
         user.add_coins(2, "بازگشت سکه — جستجوی ناشناس ناموفق")
     except Exception:
-        pass
+        logger.exception("anon_chat_timeout_task: refund failed for %s", chat_id)
 
     send_key_message_task.delay(
         chat_id=chat_id,
         text=(
-            "😔 متأسفانه در ۷ دقیقه گذشته کاربری برای چت ناشناس پیدا نشد.\n"
+            "😔 متأسفانه در ۷ دقیقه گذشته کاربری پیدا نشد.\n"
             "سکه‌های شما برگشت داده شد. دوباره تلاش کنید 🔄"
         ),
         reply_markup={
