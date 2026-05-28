@@ -205,7 +205,8 @@ def check_joined_and_respond_task(self, chat_id: int):
     joined = bot._raw_check_joined(chat_id)
 
     # Write fresh result to cache
-    cache.set(f"support_joined_{chat_id}", 1 if joined else 0, timeout=SUPPORT_CACHE_TTL)
+    # cache.set(f"support_joined_{chat_id}", 1 if joined else 0, timeout=SUPPORT_CACHE_TTL)
+    cache.set(f"support_joined:{chat_id}", 1 if joined else 0, timeout=SUPPORT_CACHE_TTL)
 
     if not joined:
         bot.send_key_message(

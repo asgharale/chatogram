@@ -166,6 +166,12 @@ class BotHandlers:
                 self.handle_deposit_reject(user, chat_id, cb_data)
             else:
                 self.send_main_menu(chat_id)
+        if photo and text is None and cb_data is None:
+            if not self.bot.is_joined_supporteds(chat_id):
+                self._send_support_gate(chat_id)
+                return
+            self.handle_photo_message(user, chat_id, photo)
+            return
 
     # ══════════════════════════════════════════════════════════════════════════
     # Internal helpers
@@ -444,7 +450,7 @@ class BotHandlers:
                 "از منوی اصلی یه همشهری یا هم‌سن پیدا کن، یا چت ناشناس رو امتحان کن 😎"
             ),
         )
-
+        self.send_main_menu(chat_id)
         user.refresh_from_db()
         self._process_referral_reward(user)
 

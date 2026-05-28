@@ -73,7 +73,7 @@ class MessageSerializer(serializers.Serializer):
 
     contact = ContactSerializer(required=False, allow_null=True)
     chat = ChatSerializer(required=False, allow_null=True)
-    from_user = UserSerializer(source="from", required=False)
+    from_user = UserSerializer(source="from", required=False, allow_null=True)
 
     document = DocumentSerializer(required=False, allow_null=True)
 
