@@ -8,18 +8,14 @@ from .models import SupportChannel
 import os
 
 SUPPORT_CACHE_TTL = 300
-QUEUE_KEY         = "anon_chat_queue"          # legacy / "any" gender queue
+QUEUE_KEY         = "anon_chat_queue"
 QUEUE_LOCK_KEY    = "anon_chat_queue_lock"
 
-# Keyed queues for gender-filtered anonymous chat
-# key = "anon_chat_queue_boys"  → waiting for a male partner
-# key = "anon_chat_queue_girls" → waiting for a female partner
 QUEUE_KEY_BOYS    = "anon_chat_queue_boys"
 QUEUE_KEY_GIRLS   = "anon_chat_queue_girls"
 QUEUE_LOCK_BOYS   = "anon_chat_queue_boys_lock"
 QUEUE_LOCK_GIRLS  = "anon_chat_queue_girls_lock"
 
-# Telegram/Bale chat-id of admin "Asghar" who reviews deposits
 ADMIN_CHAT_ID: int = int(os.environ.get("ADMIN_CHAT_ID", "0"))
 
 DEFAULT_TOPUP_PACKAGES = [
@@ -33,10 +29,19 @@ CHAT_START_COST    = 8
 WELCOME_COINS      = 30
 REFERRAL_REWARD    = 5_000
 
+# FIX (opt): must match ANON_QUEUE_TIMEOUT in tasks.py so the cache entry
+# outlives the Celery countdown.  Was 300 s (5 min) but the timeout task
+# fires at 7 min — causing the entry to expire first and the timeout
+# message to never reach the user.
+ANON_QUEUE_TTL = 7 * 60 + 30   # 7.5 min — comfortably outlives the task
+
 BOT_USERNAME = "alochatbot"
 
 
 class BaleBotService:
+    # FIX (opt-1): class-level session so one TCP connection pool is reused
+    # across all requests instead of a new Session per webhook hit.
+    _session: "requests.Session | None" = None
 
     main_reply_keyboard = {
         "keyboard": [
@@ -77,7 +82,14 @@ class BaleBotService:
     def __init__(self):
         self.token    = settings.BALE_BOT_TOKEN
         self.base_url = f"https://tapi.bale.ai/bot{self.token}/"
-        self.session  = self._make_session()
+        self.session  = self._get_session()
+
+    @classmethod
+    def _get_session(cls) -> requests.Session:
+        # FIX (opt-1): reuse one session across requests
+        if cls._session is None:
+            cls._session = cls._make_session()
+        return cls._session
 
     @staticmethod
     def _make_session() -> requests.Session:
@@ -132,13 +144,11 @@ class BaleBotService:
     ):
         payload = {
             "chat_id": chat_id,
-            "photo": file_id,
+            "photo":   file_id,
             "caption": caption,
         }
-
         if reply_markup:
             payload["reply_markup"] = reply_markup
-
         return self.send("sendPhoto", payload)
 
     def get_chat_member(self, channel_id, user_id):
@@ -158,8 +168,12 @@ class BaleBotService:
                     return False
             return True
         except Exception as e:
+            # FIX (bug-1): was returning False on network/API error, which
+            # caused the support-channel gate to fire for legitimate members
+            # every time the 5-minute cache expired and the API was slow.
+            # Fail-open: never penalise a user for a transient API hiccup.
             print(f"[BaleBot] _raw_check_joined error for {chat_id}: {e}")
-            return False
+            return True
 
     def is_joined_supporteds(self, chat_id: int) -> bool:
         cache_key = f"support_joined_{chat_id}"
@@ -173,11 +187,13 @@ class BaleBotService:
     def invalidate_support_cache(self, chat_id: int):
         cache.delete(f"support_joined_{chat_id}")
 
+    # ── Legacy "any" queue helpers (kept for backward-compat) ────────────────
+
     def get_queued_user(self):
         return cache.get(QUEUE_KEY)
 
     def set_queued_user(self, bale_id: int) -> bool:
-        return bool(cache.add(QUEUE_KEY, bale_id, timeout=300))
+        return bool(cache.add(QUEUE_KEY, bale_id, timeout=ANON_QUEUE_TTL))
 
     def remove_queued_user(self):
         cache.delete(QUEUE_KEY)
@@ -194,8 +210,13 @@ class BaleBotService:
         finally:
             cache.delete(QUEUE_LOCK_KEY)
 
+    # ── Province / city / age menus  (FIX opt-5: cached) ────────────────────
 
     def get_province_menu(self):
+        cache_key = "menu:provinces"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
         kb, row = {"inline_keyboard": []}, []
         for p in Province.objects.all():
             row.append({"text": p.name, "callback_data": f"province_{p.id}"})
@@ -203,9 +224,14 @@ class BaleBotService:
                 kb["inline_keyboard"].append(row); row = []
         if row:
             kb["inline_keyboard"].append(row)
+        cache.set(cache_key, kb, timeout=3600)
         return kb
 
     def get_city_menu(self, province_id=None):
+        cache_key = f"menu:cities:{province_id or 'all'}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
         kb     = {"inline_keyboard": []}
         cities = City.objects.all()
         if province_id:
@@ -217,9 +243,14 @@ class BaleBotService:
                 kb["inline_keyboard"].append(row); row = []
         if row:
             kb["inline_keyboard"].append(row)
+        cache.set(cache_key, kb, timeout=3600)
         return kb
 
     def get_age_menu(self):
+        cache_key = "menu:ages"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
         kb, row = {"inline_keyboard": []}, []
         for age in range(9, 49):
             row.append({"text": str(age), "callback_data": f"age_{age}"})
@@ -227,6 +258,7 @@ class BaleBotService:
                 kb["inline_keyboard"].append(row); row = []
         if row:
             kb["inline_keyboard"].append(row)
+        cache.set(cache_key, kb, timeout=86400)
         return kb
 
     def get_supports_menu(self):
@@ -286,14 +318,7 @@ class BaleBotService:
             ]]
         }
 
-    # ------------------------------------------------------------------
-    # Anonymous chat – gender preference entry menu
-    # ------------------------------------------------------------------
     def get_anon_gender_pref_menu(self) -> dict:
-        """
-        Shown when the user taps 🎭 چت ناشناس.
-        Lets them choose to chat with boys, girls, or anyone.
-        """
         return {
             "inline_keyboard": [
                 [
@@ -306,28 +331,15 @@ class BaleBotService:
             ]
         }
 
-    # ------------------------------------------------------------------
-    # Profile view menu
-    # ------------------------------------------------------------------
     def get_profile_menu(self) -> dict:
-        """Inline keyboard shown under the user's own profile card."""
         return {
             "inline_keyboard": [
                 [{"text": "✏️ ویرایش پروفایل",     "callback_data": "edit_profile"}],
-                # FIX 1: exposes the photo-upload flow from the profile view
                 [{"text": "📷 تغییر عکس پروفایل", "callback_data": "change_profile_pic"}],
             ]
         }
 
-    # ------------------------------------------------------------------
-    # Admin deposit notification  (FIX: was missing – admin never saw receipt)
-    # ------------------------------------------------------------------
     def notify_admin_new_deposit(self, deposit, user, is_photo: bool) -> None:
-        """
-        Forward the receipt (photo or document) with user details and
-        approve / reject inline buttons to the admin (Asghar).
-        Set ADMIN_CHAT_ID in your environment / Django settings.
-        """
         if not ADMIN_CHAT_ID:
             print("[BaleBot] ADMIN_CHAT_ID not configured – skipping admin notification")
             return
@@ -343,7 +355,6 @@ class BaleBotService:
                 reply_markup=markup,
             )
         else:
-            # document receipt
             self.send(
                 "sendDocument",
                 {
@@ -376,52 +387,45 @@ class BaleBotService:
         ]
         return "\n".join(lines)
 
-    # ------------------------------------------------------------------
-    # Gender-filtered anonymous queue helpers
-    # ------------------------------------------------------------------
+    # ── Gender-filtered anonymous queue helpers ──────────────────────────────
+
+    def _pref_keys(self, pref: str):
+        """Return (queue_key, lock_key) for the given preference."""
+        return {
+            "boys":  (QUEUE_KEY_BOYS,  QUEUE_LOCK_BOYS),
+            "girls": (QUEUE_KEY_GIRLS, QUEUE_LOCK_GIRLS),
+        }.get(pref, (QUEUE_KEY, QUEUE_LOCK_KEY))
+
     def get_queued_user_for_pref(self, pref: str):
-        """
-        pref: "boys" | "girls" | "any"
-        Returns the waiting chat_id whose gender matches what we need,
-        or falls back to the generic queue for "any".
-        """
-        key = {
-            "boys":  QUEUE_KEY_BOYS,
-            "girls": QUEUE_KEY_GIRLS,
-        }.get(pref, QUEUE_KEY)
+        key, _ = self._pref_keys(pref)
         return cache.get(key)
 
     def set_queued_user_for_pref(self, bale_id: int, pref: str) -> bool:
-        """Add the user to the appropriate gender queue. Returns False if occupied."""
-        key = {
-            "boys":  QUEUE_KEY_BOYS,
-            "girls": QUEUE_KEY_GIRLS,
-        }.get(pref, QUEUE_KEY)
-        return bool(cache.add(key, bale_id, timeout=300))
+        """
+        Add user to their gender queue. Returns False if the slot is occupied.
+        FIX (bug-3): uses ANON_QUEUE_TTL (7.5 min) instead of the old 300 s
+        (5 min) so the entry outlives the 7-min timeout task countdown.
+        """
+        key, _ = self._pref_keys(pref)
+        return bool(cache.add(key, bale_id, timeout=ANON_QUEUE_TTL))
 
     def remove_queued_user_for_pref(self, pref: str):
-        key = {
-            "boys":  QUEUE_KEY_BOYS,
-            "girls": QUEUE_KEY_GIRLS,
-        }.get(pref, QUEUE_KEY)
+        key, _ = self._pref_keys(pref)
         cache.delete(key)
 
     def pop_queued_user_for_pref(self, my_chat_id: int, my_gender: int, pref: str):
         """
-        Attempt to match the current user against the queue.
+        Look in the OPPOSITE queue for a partner, atomically pop and return
+        their chat_id, or return None if no match.
 
-        Logic:
-        - pref == "boys"  → pull from QUEUE_KEY_GIRLS
-          (user wants to talk to a boy, so they themselves are in the girls queue
-           and we look in the boys queue for their match, or vice versa — see note)
+        Queue semantics:
+          QUEUE_KEY_BOYS  = users who WANT a male partner
+          QUEUE_KEY_GIRLS = users who WANT a female partner
+          QUEUE_KEY       = pref="any" (no preference)
 
-        NOTE: The queue key name reflects the SEEKER's preference, not their gender.
-              "anon_pref_boys" means "I want to chat with a boy", so we put this
-              user into QUEUE_KEY_BOYS (waiting for someone who wants boys) and
-              look for a partner in QUEUE_KEY_GIRLS (someone who wants girls).
-              For "any" we use the generic key on both sides.
-
-        Returns the matched partner's chat_id, or None.
+        Cross-pref matching: user wanting "boys" checks QUEUE_KEY_GIRLS
+        (someone who wants girls) so both parties get what they asked for.
+        For "any" both sides share the same key.
         """
         partner_key, partner_lock = {
             "boys":  (QUEUE_KEY_GIRLS,  QUEUE_LOCK_GIRLS),
