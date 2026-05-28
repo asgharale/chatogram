@@ -17,6 +17,7 @@ from .services import (
     REFERRAL_REWARD,
     ANON_QUEUE_TTL,
 )
+from chat.models import ChatSession
 
 logger = logging.getLogger(__name__)
 
