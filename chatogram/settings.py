@@ -13,7 +13,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# FIX 6: Read from environment — set DEBUG=True in .env for local dev only.
+DEBUG = os.getenv("DEBUG", "False") == "True"
 
 ALLOWED_HOSTS = [
     "balochat.ir",
@@ -132,12 +133,13 @@ STATIC_URL = '/static/'
 
 BALE_BOT_TOKEN = os.getenv('BALE_BOT_TOKEN')
 
-# CORS_ALLOWED_ORIGINS = [
-#     "https://balochat.ir", "https://www.balochat.ir"
-#     "http://balochat.ir", "http://www.balochat.ir",
-#     "178.239.147.146", "http://178.239.147.146",
-#     "178.239.147.146:8003"
-# ]
+# FIX 6: CORS whitelist — was commented out, leaving the API open to all origins.
+CORS_ALLOWED_ORIGINS = [
+    "https://balochat.ir",
+    "https://www.balochat.ir",
+    "http://balochat.ir",
+    "http://www.balochat.ir",
+]
 
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

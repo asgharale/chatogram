@@ -784,7 +784,13 @@ class BotHandlers:
         if not user.city:
             send_message_task.delay(chat_id=chat_id, text="شهرت رو هنوز ثبت نکردی ❗️")
             return
-        related  = UserProfile.objects.filter(city=user.city).exclude(bale_id=chat_id)[:20]
+        related  = (
+            UserProfile.objects
+            .filter(city=user.city)
+            .exclude(bale_id=chat_id)
+            .only("bale_id", "first_name", "username", "photo_file_id")
+            [:20]
+        )
         keyboard = self._create_user_list_keyboard(related)
         if not keyboard:
             send_message_task.delay(chat_id=chat_id, text="هنوز همشهری‌ای پیدا نشد 😔")
@@ -802,10 +808,13 @@ class BotHandlers:
         if not user.age:
             send_message_task.delay(chat_id=chat_id, text="سنت رو هنوز ثبت نکردی ❗️")
             return
-        related  = UserProfile.objects.filter(
-            age__gte=user.age - 5,
-            age__lte=user.age + 5,
-        ).exclude(bale_id=chat_id)[:20]
+        related  = (
+            UserProfile.objects
+            .filter(age__gte=user.age - 5, age__lte=user.age + 5)
+            .exclude(bale_id=chat_id)
+            .only("bale_id", "first_name", "age", "photo_file_id")
+            [:20]
+        )
         keyboard = self._create_user_list_keyboard(related, show_age=True)
         if not keyboard:
             send_message_task.delay(chat_id=chat_id, text="هنوز هم‌سنی پیدا نشد 😔")
@@ -907,25 +916,39 @@ class BotHandlers:
                 )
                 return
 
-        for u in (user, requester):
-            if u.get_wallet_balance() < CHAT_START_COST:
-                whose = "شما" if u == user else (requester.first_name or "کاربر دیگر")
-                send_key_message_task.delay(
-                    chat_id=u.bale_id,
-                    text=(
-                        f"❌ {whose} سکه کافی برای شروع چت ندارد.\n"
-                        f"نیاز: {CHAT_START_COST} سکه"
-                    ),
-                    reply_markup={
-                        "inline_keyboard": [[
-                            {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
-                        ]]
-                    },
-                )
-                return
+        # Deduct coins atomically — deduct_coins uses select_for_update internally,
+        # so this is the authoritative check. No pre-flight balance read needed.
+        if not user.deduct_coins(CHAT_START_COST, "شروع چت"):
+            send_key_message_task.delay(
+                chat_id=chat_id,
+                text=(
+                    f"❌ موجودی کافی نیست!\n"
+                    f"برای شروع چت {CHAT_START_COST} سکه نیاز دارید."
+                ),
+                reply_markup={"inline_keyboard": [[
+                    {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
+                ]]},
+            )
+            return
 
-        user.deduct_coins(CHAT_START_COST, "شروع چت")
-        requester.deduct_coins(CHAT_START_COST, "شروع چت")
+        if not requester.deduct_coins(CHAT_START_COST, "شروع چت"):
+            # Requester is short — refund user immediately
+            user.add_coins(CHAT_START_COST, "بازگشت سکه — طرف مقابل موجودی کافی ندارد")
+            send_key_message_task.delay(
+                chat_id=requester.bale_id,
+                text=(
+                    f"❌ موجودی کافی نیست!\n"
+                    f"برای شروع چت {CHAT_START_COST} سکه نیاز دارید."
+                ),
+                reply_markup={"inline_keyboard": [[
+                    {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
+                ]]},
+            )
+            send_message_task.delay(
+                chat_id=chat_id,
+                text="❌ چت شروع نشد — طرف مقابل موجودی کافی ندارد.",
+            )
+            return
 
         session.status = 1
         session.save()

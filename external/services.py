@@ -100,6 +100,8 @@ def _pref_to_own_queue_key(pref: str) -> str:
 class BaleBotService:
     # One shared requests.Session reused across all tasks in the same worker process.
     _session: Optional[requests.Session] = None
+    # One shared Redis client — avoids opening a new connection per task.
+    _redis_client: Optional[redis.Redis] = None
 
     # ── Static menus ───────────────────────────────────────────────────────────
     main_reply_keyboard = {
@@ -136,7 +138,7 @@ class BaleBotService:
         self.token    = settings.BALE_BOT_TOKEN
         self.base_url = f"https://tapi.bale.ai/bot{self.token}/"
         self.session  = self._get_session()
-        self._r       = _get_redis()
+        self._r       = self._get_redis_client()
 
     # ── HTTP session ───────────────────────────────────────────────────────────
 
@@ -160,6 +162,21 @@ class BaleBotService:
         s.mount("https://", adapter)
         s.mount("http://",  adapter)
         return s
+
+    @classmethod
+    def _get_redis_client(cls) -> redis.Redis:
+        """
+        Return a process-level Redis client singleton.
+        max_connections caps the pool per worker process so we never
+        exhaust Redis connections under high concurrency.
+        """
+        if cls._redis_client is None:
+            cls._redis_client = redis.Redis.from_url(
+                settings.CELERY_BROKER_URL,
+                decode_responses=True,
+                max_connections=20,
+            )
+        return cls._redis_client
 
     # ── Low-level send ─────────────────────────────────────────────────────────
 
@@ -235,14 +252,18 @@ class BaleBotService:
             return True
 
     def is_joined_supporteds(self, chat_id: int) -> bool:
-        """Cache-first membership check (never makes an API call if cached)."""
-        cache_key = f"support_joined:{chat_id}"
-        cached    = cache.get(cache_key)
+        """
+        Cache-only membership check — NEVER makes a live API call.
+
+        On a cache miss we return False and let the user tap '✅ عضو شدم',
+        which fires check_joined_and_respond_task (slow queue) where the
+        real Bale API call happens.  This keeps the fast queue non-blocking.
+        """
+        cached = cache.get(f"support_joined:{chat_id}")
         if cached is not None:
             return bool(cached)
-        result = self._raw_check_joined(chat_id)
-        cache.set(cache_key, 1 if result else 0, timeout=SUPPORT_CACHE_TTL)
-        return result
+        # Cache miss → treat as unverified; slow task will verify on demand
+        return False
 
     def invalidate_support_cache(self, chat_id: int):
         cache.delete(f"support_joined:{chat_id}")
@@ -252,27 +273,31 @@ class BaleBotService:
     def enqueue_user_for_pref(self, bale_id: int, pref: str) -> bool:
         """
         Push the user onto the queue for their pref.
+        Also maintains a companion SET for O(1) membership checks.
         Returns False if they are already in that queue (idempotent).
         """
-        key = _pref_to_own_queue_key(pref)
-        r   = self._r
+        key        = _pref_to_own_queue_key(pref)
+        member_key = f"{key}:members"
+        r          = self._r
 
-        # Prevent duplicates with a membership check + atomic push
-        # LPOS returns the index if found, None if not
-        if r.lpos(key, str(bale_id)) is not None:
-            return False
+        # Atomic: only add if not already a member
+        if not r.sadd(member_key, str(bale_id)):
+            return False   # already queued
 
+        r.expire(member_key, ANON_QUEUE_TTL + 60)
         r.rpush(key, str(bale_id))
-        r.expire(key, ANON_QUEUE_TTL + 60)   # safety TTL on the list itself
+        r.expire(key, ANON_QUEUE_TTL + 60)
         return True
 
     def dequeue_partner_for_pref(self, my_bale_id: int, pref: str) -> Optional[int]:
         """
         Atomically pop a waiting partner from the OPPOSITE queue.
         Skips if the popped ID equals our own (edge-case safety).
+        Cleans up the companion SET on successful pop.
         Returns the partner's bale_id or None.
         """
-        partner_key = _pref_to_queue_key(pref)
+        partner_key        = _pref_to_queue_key(pref)
+        partner_member_key = f"{partner_key}:members"
         try:
             result = self._r.eval(
                 _LUA_POP_UNLESS_SELF,
@@ -280,24 +305,31 @@ class BaleBotService:
                 partner_key,
                 str(my_bale_id),
             )
-            return int(result) if result else None
+            if result:
+                # Clean up membership SET for the popped partner
+                self._r.srem(partner_member_key, result)
+                return int(result)
+            return None
         except Exception:
             logger.exception("dequeue_partner_for_pref failed for %s pref=%s", my_bale_id, pref)
             return None
 
     def is_in_queue(self, bale_id: int, pref: str) -> bool:
-        """Return True if the user is currently waiting in their queue."""
-        key = _pref_to_own_queue_key(pref)
+        """Return True if the user is currently waiting in their queue. O(1) via SET."""
+        key        = _pref_to_own_queue_key(pref)
+        member_key = f"{key}:members"
         try:
-            return self._r.lpos(key, str(bale_id)) is not None
+            return bool(self._r.sismember(member_key, str(bale_id)))
         except Exception:
             return False
 
     def remove_from_queue(self, bale_id: int, pref: str):
-        """Remove a specific user from the queue (cancel or timeout)."""
-        key = _pref_to_own_queue_key(pref)
+        """Remove a specific user from the queue and membership set (cancel or timeout)."""
+        key        = _pref_to_own_queue_key(pref)
+        member_key = f"{key}:members"
         try:
             self._r.eval(_LUA_LREM, 1, key, str(bale_id))
+            self._r.srem(member_key, str(bale_id))
         except Exception:
             logger.exception("remove_from_queue failed for %s pref=%s", bale_id, pref)
 

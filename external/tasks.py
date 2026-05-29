@@ -77,27 +77,51 @@ def process_webhook_task(self, raw_data: dict):
     username   = from_user.get("username")
 
     # ── 3. Upsert UserProfile ──────────────────────────────────────────────────
-    user, created = UserProfile.objects.get_or_create(
-        bale_id=chat_id,
-        defaults={
-            "first_name": first_name,
-            "last_name":  last_name,
-            "username":   username,
-        },
-    )
+    # FIX 7: Skip the get_or_create write for users seen in the last 5 minutes.
+    # A cache hit means the user exists and their name fields were recently verified,
+    # so we only do a fast SELECT instead of a SELECT + potential UPDATE.
+    upsert_cache_key = f"user_seen:{chat_id}"
 
-    if not created:
-        changed_fields = []
-        for field, val in [
-            ("first_name", first_name),
-            ("last_name",  last_name),
-            ("username",   username),
-        ]:
-            if val and getattr(user, field) != val:
-                setattr(user, field, val)
-                changed_fields.append(field)
-        if changed_fields:
-            user.save(update_fields=changed_fields)
+    if cache.get(upsert_cache_key):
+        # Known user — just fetch, no write needed
+        try:
+            user    = UserProfile.objects.get(bale_id=chat_id)
+            created = False
+        except UserProfile.DoesNotExist:
+            # Stale cache entry (e.g. after a DB wipe in dev) — fall through
+            cache.delete(upsert_cache_key)
+            user, created = UserProfile.objects.get_or_create(
+                bale_id=chat_id,
+                defaults={
+                    "first_name": first_name,
+                    "last_name":  last_name,
+                    "username":   username,
+                },
+            )
+            cache.set(upsert_cache_key, 1, timeout=300)
+    else:
+        user, created = UserProfile.objects.get_or_create(
+            bale_id=chat_id,
+            defaults={
+                "first_name": first_name,
+                "last_name":  last_name,
+                "username":   username,
+            },
+        )
+        cache.set(upsert_cache_key, 1, timeout=300)   # cache for 5 min
+
+        if not created:
+            changed_fields = []
+            for field, val in [
+                ("first_name", first_name),
+                ("last_name",  last_name),
+                ("username",   username),
+            ]:
+                if val and getattr(user, field) != val:
+                    setattr(user, field, val)
+                    changed_fields.append(field)
+            if changed_fields:
+                user.save(update_fields=changed_fields)
 
     # ── 4. Dispatch ────────────────────────────────────────────────────────────
     bot      = BaleBotService()

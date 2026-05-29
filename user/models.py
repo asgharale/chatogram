@@ -41,6 +41,9 @@ class UserProfile(BaseModel):
             models.Index(fields=['city']),
             models.Index(fields=['age']),
             models.Index(fields=['referral_code']),
+            # FIX 5: composite index covers both citizens (city) and ages (age range) queries
+            # and avoids a separate index scan + filter step for each
+            models.Index(fields=['city', 'age'], name='userprofile_city_age_idx'),
         ]
 
     def __str__(self):
@@ -53,7 +56,6 @@ class UserProfile(BaseModel):
                 code = _generate_referral_code()
             self.referral_code = code
         super().save(*args, **kwargs)
-
 
     def _wallet(self) -> "Wallet":
         wallet, _ = Wallet.objects.get_or_create(user=self)
@@ -166,7 +168,6 @@ class PendingDeposit(BaseModel):
         )
 
     def approve(self) -> None:
-        """FIX: wrapped in select_for_update to prevent double-approve race."""
         with transaction.atomic():
             deposit = (
                 PendingDeposit.objects
@@ -183,7 +184,6 @@ class PendingDeposit(BaseModel):
             self.reviewed_at = deposit.reviewed_at
 
     def reject(self) -> None:
-        """FIX: wrapped in select_for_update to prevent double-reject race."""
         with transaction.atomic():
             deposit = (
                 PendingDeposit.objects
