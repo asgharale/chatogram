@@ -123,6 +123,17 @@ def process_webhook_task(self, raw_data: dict):
             if changed_fields:
                 user.save(update_fields=changed_fields)
 
+    # ── 3b. Track online presence ──────────────────────────────────────────────
+    # Redis key expires in 5 min — used for "آنلاین 🟢" status in search results.
+    cache.set(f"online:{chat_id}", 1, timeout=300)
+
+    # Throttle DB write for last_seen_at to at most once per 30 min per user.
+    ls_throttle_key = f"ls_db:{chat_id}"
+    if not cache.get(ls_throttle_key):
+        from django.utils import timezone as _tz
+        UserProfile.objects.filter(bale_id=chat_id).update(last_seen_at=_tz.now())
+        cache.set(ls_throttle_key, 1, timeout=1800)
+
     # ── 4. Dispatch ────────────────────────────────────────────────────────────
     bot      = BaleBotService()
     handlers = BotHandlers(bot)
@@ -295,13 +306,14 @@ def anon_chat_timeout_task(chat_id: int, pref: str = "any"):
 
     bot.remove_from_queue(chat_id, pref)
 
-    # Refund
-    try:
-        from user.models import UserProfile
-        user = UserProfile.objects.get(bale_id=chat_id)
-        user.add_coins(2, "بازگشت سکه — جستجوی ناشناس ناموفق")
-    except Exception:
-        logger.exception("anon_chat_timeout_task: refund failed for %s", chat_id)
+    # Refund only when the pref was not free (i.e. coins were actually deducted)
+    if pref != "any":
+        try:
+            from user.models import UserProfile
+            user = UserProfile.objects.get(bale_id=chat_id)
+            user.add_coins(2, "بازگشت سکه — جستجوی ناشناس ناموفق")
+        except Exception:
+            logger.exception("anon_chat_timeout_task: refund failed for %s", chat_id)
 
     send_key_message_task.delay(
         chat_id=chat_id,

@@ -435,9 +435,10 @@ class BaleBotService:
     def get_profile_menu(self) -> dict:
         return {
             "inline_keyboard": [
-                [{"text": "✏️ ویرایش پروفایل",     "callback_data": "edit_profile"}],
-                [{"text": "📷 تغییر عکس پروفایل", "callback_data": "change_profile_pic"}],
-                [{"text": "🔗 کد معرفی من",        "callback_data": "show_referral"}],
+                [{"text": "📝 تغییر نام",           "callback_data": "change_name"}],
+                [{"text": "✏️ ویرایش اطلاعات",     "callback_data": "edit_profile"}],
+                [{"text": "📷 تغییر عکس پروفایل",  "callback_data": "change_profile_pic"}],
+                [{"text": "🔗 کد معرفی من",         "callback_data": "show_referral"}],
             ]
         }
 

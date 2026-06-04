@@ -33,6 +33,9 @@ SEARCH_PAGE_SIZE = 10
 # Countdown after user joins anon queue → must be < ANON_QUEUE_TTL
 ANON_CHAT_COUNTDOWN = 7 * 60  # 7 min
 
+# Gender preference for which anonymous chat is free (no coin cost)
+FREE_ANON_PREF = "any"
+
 # Maps reply-keyboard button text → logical callback action
 REPLY_KB_COMMANDS = {
     "👥 همشهری‌ها":                "get_related_citizens",
@@ -92,6 +95,10 @@ class BotHandlers:
 
             # ── Check for pending DM state BEFORE reply-keyboard dispatch ─────
             user_state = cache.get(f"user_state_{chat_id}")
+            if user_state == "awaiting_name":
+                self.handle_name_input(user, chat_id, text)
+                return
+
             if user_state and user_state.startswith("dm_to_"):
                 try:
                     target_bale_id = int(user_state.split("dm_to_")[1])
@@ -220,6 +227,8 @@ class BotHandlers:
                 self.handle_view_profile(user, chat_id)
             elif cb_data in ("set_profile_pic", "change_profile_pic"):
                 self.handle_set_profile_pic(user, chat_id)
+            elif cb_data == "change_name":
+                self.handle_change_name(user, chat_id)
             elif cb_data == "edit_profile":
                 self.handle_start(user, chat_id, created=False)
             elif cb_data == "show_referral":
@@ -352,6 +361,36 @@ class BotHandlers:
         except (UserProfile.DoesNotExist, ValueError, IndexError):
             return None
 
+    def _get_user_status_label(
+        self,
+        u,
+        in_chat_pks: set,
+        online_bale_ids: set,
+    ) -> str:
+        """
+        Returns a short human-readable presence string for one user.
+        in_chat_pks    — set of UserProfile PKs currently in active sessions (pre-fetched)
+        online_bale_ids — set of bale_ids seen in the last 5 minutes (from cache)
+        """
+        if u.pk in in_chat_pks:
+            return "در حال چت 🔴"
+        if u.bale_id in online_bale_ids:
+            return "آنلاین 🟢"
+        if u.last_seen_at:
+            from django.utils import timezone
+            diff          = timezone.now() - u.last_seen_at
+            total_seconds = int(diff.total_seconds())
+            if total_seconds < 3_600:
+                mins = max(1, total_seconds // 60)
+                return f"🕐 {mins} دقیقه پیش"
+            elif total_seconds < 86_400:
+                return f"🕐 {total_seconds // 3_600} ساعت پیش"
+            elif diff.days <= 30:
+                return f"🗓 {diff.days} روز پیش"
+            else:
+                return "⚫ خیلی وقته"
+        return "⚫ نامشخص"
+
     # ══════════════════════════════════════════════════════════════════════════
     # Referral helpers
     # ══════════════════════════════════════════════════════════════════════════
@@ -450,24 +489,37 @@ class BotHandlers:
 
         if created:
             user.add_coins(WELCOME_COINS, "هدیه خوش‌آمد 🎁")
+            if ref_code:
+                self._attach_referrer(user, ref_code)
+            # ── Ask for a display name BEFORE gender ──────────────────────────
+            cache.set(f"user_state_{chat_id}", "awaiting_name", timeout=USER_STATE_TTL)
             send_message_task.delay(
                 chat_id=chat_id,
                 text=(
-                    f"🎁 خوش اومدی! {WELCOME_COINS} سکه هدیه به کیف پولت اضافه شد.\n"
-                    f"این سکه‌ها رو برای چت با کاربرهای جدید استفاده کن 😊"
+                    f"به الوچت خوش اومدی! 👋\n"
+                    f"🎁 {WELCOME_COINS} سکه هدیه به کیف پولت اضافه شد.\n\n"
+                    "اول یه اسم برای خودت انتخاب کن:\n"
+                    "(اسم واقعی یا هر اسمی که دوست داری 😊)"
                 ),
             )
-            if ref_code:
-                self._attach_referrer(user, ref_code)
+            return
 
-        if created or not user.gender:
-            send_key_message_task.delay(
+        # ── Existing user: continue onboarding from where they left off ───────
+        if not user.first_name:
+            cache.set(f"user_state_{chat_id}", "awaiting_name", timeout=USER_STATE_TTL)
+            send_message_task.delay(
                 chat_id=chat_id,
                 text=(
-                    "به الو‌چت خوش اومدی 👋\n"
-                    "فقط چند ثانیه وقت بذار تا پروفایلت رو بسازیم.\n\n"
-                    "اول بگو آقا هستی یا خانم؟"
+                    "سلام! 👋 هنوز اسمی تنظیم نکردی.\n"
+                    "یه اسم بنویس تا بقیه ببیننت:"
                 ),
+            )
+            return
+
+        if not user.gender:
+            send_key_message_task.delay(
+                chat_id=chat_id,
+                text="جنسیتت رو انتخاب کن:",
                 reply_markup=self.bot.gender_glass_keyboard,
             )
         elif not user.province:
@@ -490,6 +542,54 @@ class BotHandlers:
             )
         else:
             self.send_main_menu(chat_id)
+
+    def handle_name_input(self, user, chat_id: int, text: str):
+        """
+        Saves a user-supplied display name.
+        Called from both new-user onboarding and profile 'تغییر نام'.
+        Continues to gender selection if onboarding is not yet complete.
+        """
+        from .tasks import send_message_task, send_key_message_task
+
+        name = text.strip()[:60]
+        if len(name) < 2:
+            send_message_task.delay(
+                chat_id=chat_id,
+                text="اسم باید حداقل ۲ کاراکتر باشه ❗️ دوباره بزن:",
+            )
+            return
+
+        parts            = name.split(maxsplit=1)
+        user.first_name  = parts[0][:50]
+        user.last_name   = parts[1][:50] if len(parts) > 1 else None
+        user.save(update_fields=["first_name", "last_name"])
+        cache.delete(f"user_state_{chat_id}")
+
+        send_message_task.delay(chat_id=chat_id, text=f"✅ اسمت به «{name}» ثبت شد 😊")
+
+        if user.gender is None:
+            # Still in onboarding — move to gender step
+            send_key_message_task.delay(
+                chat_id=chat_id,
+                text="حالا بگو آقا هستی یا خانم؟",
+                reply_markup=self.bot.gender_glass_keyboard,
+            )
+        else:
+            self.send_main_menu(chat_id)
+
+    def handle_change_name(self, user, chat_id: int):
+        """Entry point for 'تغییر نام' from the profile menu."""
+        from .tasks import send_message_task
+        current = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        cache.set(f"user_state_{chat_id}", "awaiting_name", timeout=USER_STATE_TTL)
+        send_message_task.delay(
+            chat_id=chat_id,
+            text=(
+                f"اسم فعلی: «{current or '---'}»\n\n"
+                "اسم جدیدت رو بنویس:\n"
+                "(برای انصراف /cancel بزنید)"
+            ),
+        )
 
     def handle_contact(self, user, chat_id: int, contact: dict):
         from .tasks import send_message_task
@@ -930,12 +1030,17 @@ class BotHandlers:
     ):
         """
         Fetches one page of search results and sends it.
-        Saves pagination state in cache so 'more' and 'back' work.
+        Each entry shows: name, age, gender, city, @code, likes, online status.
+        Users currently in an active chat get no action buttons (they are listed
+        in the text but the keyboard only shows navigation rows).
+        Saves pagination state in cache so 'more' and 'back' work correctly.
         """
         from .tasks import send_key_message_task, send_message_task
         from user.models import ProfileLike
+        from chat.models import ChatSession
+        from django.db.models import Q
 
-        # Guard: ensure user has required data for this search type
+        # ── Guard: user must have the data needed for this search type ────────
         missing = None
         if search_type == "ages" and not user.age:
             missing = "سنت رو هنوز ثبت نکردی ❗️"
@@ -965,47 +1070,69 @@ class BotHandlers:
             send_message_task.delay(chat_id=chat_id, text=msg)
             return
 
-        # ── Build result text ─────────────────────────────────────────────────
+        page_pks   = [u.pk for u in page_users]
+        bale_ids   = [u.bale_id for u in page_users]
+
+        # ── Batch: like counts ────────────────────────────────────────────────
+        like_counts: dict = {}
+        for row in ProfileLike.objects.filter(liked_id__in=page_pks).values("liked_id"):
+            like_counts[row["liked_id"]] = like_counts.get(row["liked_id"], 0) + 1
+
+        # ── Batch: in-chat status (one query) ─────────────────────────────────
+        in_chat_sessions = (
+            ChatSession.objects
+            .filter(Q(user1_id__in=page_pks) | Q(user2_id__in=page_pks), status=1)
+            .values_list("user1_id", "user2_id")
+        )
+        page_pk_set  = set(page_pks)
+        in_chat_pks  = {pk for pair in in_chat_sessions for pk in pair if pk in page_pk_set}
+
+        # ── Batch: online status (multi-get from cache) ───────────────────────
+        online_cache    = cache.get_many([f"online:{bid}" for bid in bale_ids])
+        online_bale_ids = {int(k.split(":")[1]) for k, v in online_cache.items() if v}
+
+        # ── Build text ────────────────────────────────────────────────────────
         TITLE = {
-            "featured":  "🔎 جستجوی ویژه",
-            "ages":      "🎂 هم‌سن‌ها",
-            "citizens":  "👥 همشهری‌ها",
-            "province":  "🗺 هم‌استانی‌ها",
+            "featured": "🔎 جستجوی ویژه",
+            "ages":     "🎂 هم‌سن‌ها",
+            "citizens": "👥 همشهری‌ها",
+            "province": "🗺 هم‌استانی‌ها",
         }
         page_num = offset // SEARCH_PAGE_SIZE + 1
-        lines    = [
+        lines = [
             f"{TITLE.get(search_type, '🔍 نتایج')} — صفحه {page_num}",
             f"نمایش {offset + 1}–{min(offset + SEARCH_PAGE_SIZE, total)} از {total} نفر",
             "─" * 24,
         ]
 
-        # Pre-fetch like counts for this page in one query
-        page_pks        = [u.pk for u in page_users]
-        like_counts_raw = (
-            ProfileLike.objects
-            .filter(liked_id__in=page_pks)
-            .values('liked_id')
-        )
-        like_counts = {}
-        for row in like_counts_raw:
-            like_counts[row['liked_id']] = like_counts.get(row['liked_id'], 0) + 1
-
         keyboard = []
         for u in page_users:
-            city_name  = u.city.name if u.city else "---"
-            prov_name  = u.province.name if u.province else "---"
-            gender_lbl = {0: "آقا 🧑", 1: "خانم 👩"}.get(u.gender, "")
-            name       = u.first_name or "---"
-            likes      = like_counts.get(u.pk, 0)
+            city_name   = u.city.name     if u.city     else "---"
+            prov_name   = u.province.name if u.province else "---"
+            gender_lbl  = {0: "آقا 🧑", 1: "خانم 👩"}.get(u.gender, "")
+            name        = u.first_name or "---"
+            likes       = like_counts.get(u.pk, 0)
+            status      = self._get_user_status_label(u, in_chat_pks, online_bale_ids)
+            is_in_chat  = u.pk in in_chat_pks
+
             lines.append(
                 f"👤 {name} | {u.age} سال | {gender_lbl}\n"
                 f"   📍 {prov_name}، {city_name} | 🔖 @{u.referral_code or '---'}\n"
-                f"   ❤️ {likes} لایک"
+                f"   ❤️ {likes} لایک  |  {status}"
             )
-            keyboard.append([{
-                "text": f"👁 {name}، {u.age} سال — {city_name}",
-                "callback_data": f"view_user_{u.bale_id}",
-            }])
+
+            # Available users get two action buttons; in-chat users get none
+            if not is_in_chat:
+                keyboard.append([
+                    {
+                        "text":          f"👁 {name}، {u.age}",
+                        "callback_data": f"view_user_{u.bale_id}",
+                    },
+                    {
+                        "text":          f"🎭 درخواست چت",
+                        "callback_data": f"chat_req_{u.bale_id}",
+                    },
+                ])
 
         # ── Pagination row ────────────────────────────────────────────────────
         nav_row = []
@@ -1014,7 +1141,7 @@ class BotHandlers:
         nav_row.append({"text": "❌ بازگشت", "callback_data": "search_cancel"})
         keyboard.append(nav_row)
 
-        # ── Save state for pagination ─────────────────────────────────────────
+        # ── Save pagination state ─────────────────────────────────────────────
         cache.set(f"search_state:{chat_id}", {
             "type":           search_type,
             "current_offset": offset,
@@ -1027,7 +1154,6 @@ class BotHandlers:
             reply_markup={"inline_keyboard": keyboard},
         )
 
-    # ── Featured search ────────────────────────────────────────────────────────
 
     def handle_featured_search(self, user, chat_id: int):
         from .tasks import send_key_message_task, send_message_task
@@ -1506,6 +1632,8 @@ class BotHandlers:
         from user.models import UserProfile
         from chat.models import ChatSession
 
+        is_free = (pref == FREE_ANON_PREF)  # "any" gender pref is always free
+
         if self._get_active_session(user):
             send_message_task.delay(chat_id=chat_id, text="شما در حال حاضر در یک چت فعال هستید ❌")
             return
@@ -1518,23 +1646,23 @@ class BotHandlers:
             except UserProfile.DoesNotExist:
                 pass
             else:
-                for u in (user, user2):
-                    if u.get_wallet_balance() < CHAT_START_COST:
-                        self.bot.enqueue_user_for_pref(waiting_id, pref)
-                        send_key_message_task.delay(
-                            chat_id=u.bale_id,
-                            text=(
-                                f"❌ موجودی کافی نیست!\n"
-                                f"برای چت ناشناس {CHAT_START_COST} سکه لازم دارید."
-                            ),
-                            reply_markup={"inline_keyboard": [[
-                                {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
-                            ]]},
-                        )
-                        return
-
-                user.deduct_coins(CHAT_START_COST, "چت ناشناس")
-                user2.deduct_coins(CHAT_START_COST, "چت ناشناس")
+                if not is_free:
+                    for u in (user, user2):
+                        if u.get_wallet_balance() < CHAT_START_COST:
+                            self.bot.enqueue_user_for_pref(waiting_id, pref)
+                            send_key_message_task.delay(
+                                chat_id=u.bale_id,
+                                text=(
+                                    f"❌ موجودی کافی نیست!\n"
+                                    f"برای چت ناشناس {CHAT_START_COST} سکه لازم دارید."
+                                ),
+                                reply_markup={"inline_keyboard": [[
+                                    {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
+                                ]]},
+                            )
+                            return
+                    user.deduct_coins(CHAT_START_COST, "چت ناشناس")
+                    user2.deduct_coins(CHAT_START_COST, "چت ناشناس")
 
                 session  = ChatSession.objects.create(user1=user2, user2=user, status=1)
                 self._invalidate_session_cache(chat_id, waiting_id)
@@ -1554,7 +1682,7 @@ class BotHandlers:
             send_message_task.delay(chat_id=chat_id, text="هنوز در صف هستی، صبر کن 🔍")
             return
 
-        if user.get_wallet_balance() < CHAT_START_COST:
+        if not is_free and user.get_wallet_balance() < CHAT_START_COST:
             send_key_message_task.delay(
                 chat_id=chat_id,
                 text=(
@@ -1572,11 +1700,13 @@ class BotHandlers:
         anon_chat_timeout_task.apply_async(args=[chat_id, pref], countdown=ANON_CHAT_COUNTDOWN)
 
         pref_label = {"boys": "👦 پسرها", "girls": "👧 دخترها"}.get(pref, "🎭 همه")
+        cost_note  = "🆓 این چت رایگانه!" if is_free else f"در صورت اتصال {CHAT_START_COST} سکه کسر می‌شه."
         send_key_message_task.delay(
             chat_id=chat_id,
             text=(
                 f"🔍 در حال جستجو برای {pref_label}...\n"
-                "اگر تا ۷ دقیقه کسی پیدا نشد خودکار خارج می‌شی و سکه‌هات برمی‌گرده."
+                f"{cost_note}\n"
+                "اگر تا ۷ دقیقه کسی پیدا نشد خودکار خارج می‌شی."
             ),
             reply_markup={"inline_keyboard": [[
                 {"text": "لغو جستجو ❌", "callback_data": f"cancel_anon_queue_{pref}"}

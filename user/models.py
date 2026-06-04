@@ -26,6 +26,8 @@ class UserProfile(BaseModel):
     national_code   = models.CharField(max_length=14, blank=True, null=True)
     phone           = models.CharField(max_length=15, blank=True, null=True)
 
+    last_seen_at      = models.DateTimeField(null=True, blank=True, db_index=True)
+
     referral_code     = models.CharField(max_length=16, unique=True, blank=True, null=True)
     referred_by       = models.ForeignKey(
         'self',
