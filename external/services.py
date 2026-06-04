@@ -15,14 +15,10 @@ from .models import SupportChannel
 logger = logging.getLogger(__name__)
 
 # ── Cache TTLs ─────────────────────────────────────────────────────────────────
-SUPPORT_CACHE_TTL   = 300       # 5 min — channel membership check result
+SUPPORT_CACHE_TTL   = 300           # 5 min — channel membership check result
 ANON_QUEUE_TTL      = 7 * 60 + 30  # 7.5 min — queue entry outlives the timeout task
 
 # ── Anon queue Redis key names ─────────────────────────────────────────────────
-# Each key is a Redis List.
-# "BOYS"  = users who want to chat with boys   (opposite gender waits here)
-# "GIRLS" = users who want to chat with girls
-# "ANY"   = no gender preference
 QUEUE_KEY_BOYS  = "anon_queue:boys"
 QUEUE_KEY_GIRLS = "anon_queue:girls"
 QUEUE_KEY_ANY   = "anon_queue:any"
@@ -30,8 +26,8 @@ QUEUE_KEY_ANY   = "anon_queue:any"
 # ── Business constants ─────────────────────────────────────────────────────────
 CHAT_REQUEST_COST  = 2
 CHAT_START_COST    = 8
-WELCOME_COINS      = 30
-REFERRAL_REWARD    = 5_000
+WELCOME_COINS      = 15   # gift on first /start
+REFERRAL_REWARD    = 20   # coins granted to referrer when new user completes profile
 
 BOT_USERNAME = "alochatbot"
 
@@ -44,15 +40,12 @@ DEFAULT_TOPUP_PACKAGES = [
 ADMIN_CHAT_ID: int = int(os.environ.get("ADMIN_CHAT_ID", "0"))
 
 # ── Lua script: atomically pop an entry unless it equals `exclude_id` ─────────
-#   KEYS[1] = list key
-#   ARGV[1] = chat_id to exclude (don't match yourself)
 _LUA_POP_UNLESS_SELF = """
 local val = redis.call('LPOP', KEYS[1])
 if val == false then
     return nil
 end
 if val == ARGV[1] then
-    -- Put it back at the front and return nil
     redis.call('LPUSH', KEYS[1], val)
     return nil
 end
@@ -67,7 +60,6 @@ return 1
 
 
 def _get_redis() -> redis.Redis:
-    """Return a Redis client using the same URL as the Celery broker."""
     return redis.Redis.from_url(
         settings.CELERY_BROKER_URL,
         decode_responses=True,
@@ -75,14 +67,6 @@ def _get_redis() -> redis.Redis:
 
 
 def _pref_to_queue_key(pref: str) -> str:
-    """
-    Map a gender preference to the queue the *partner* sits in.
-
-    Matching rule:
-      • User wants "boys"  → look in QUEUE_GIRLS (people who want boys chat)
-      • User wants "girls" → look in QUEUE_BOYS
-      • User wants "any"   → look in QUEUE_ANY
-    """
     return {
         "boys":  QUEUE_KEY_GIRLS,
         "girls": QUEUE_KEY_BOYS,
@@ -90,7 +74,6 @@ def _pref_to_queue_key(pref: str) -> str:
 
 
 def _pref_to_own_queue_key(pref: str) -> str:
-    """Queue the current user should be pushed onto while waiting."""
     return {
         "boys":  QUEUE_KEY_BOYS,
         "girls": QUEUE_KEY_GIRLS,
@@ -98,17 +81,16 @@ def _pref_to_own_queue_key(pref: str) -> str:
 
 
 class BaleBotService:
-    # One shared requests.Session reused across all tasks in the same worker process.
     _session: Optional[requests.Session] = None
-    # One shared Redis client — avoids opening a new connection per task.
     _redis_client: Optional[redis.Redis] = None
 
     # ── Static menus ───────────────────────────────────────────────────────────
     main_reply_keyboard = {
         "keyboard": [
-            [{"text": "👥 همشهری‌ها"}, {"text": "🎂 هم‌سن‌ها"}],
-            [{"text": "🎭 چت ناشناس"}],
-            [{"text": "👛 کیف پول"},   {"text": "📸 پروفایل"}],
+            [{"text": "🔗 به یه ناشناس وصلم کن!"}],
+            [{"text": "🔍 جستجو"},         {"text": "🔎 جستجوی ویژه"}],
+            [{"text": "👥 همشهری‌ها"},     {"text": "🎂 هم‌سن‌ها"}],
+            [{"text": "👛 کسب درآمد"},     {"text": "📸 پروفایل"}],
         ],
         "resize_keyboard": True,
         "persistent":      True,
@@ -116,8 +98,8 @@ class BaleBotService:
 
     phone_keyboard = {
         "keyboard": [[{"text": "📱 ارسال شماره تلفن", "request_contact": True}]],
-        "resize_keyboard":    True,
-        "one_time_keyboard":  True,
+        "resize_keyboard":   True,
+        "one_time_keyboard": True,
     }
 
     gender_glass_keyboard = {
@@ -130,7 +112,7 @@ class BaleBotService:
         ]
     }
 
-    TIMEOUT = (4, 8)   # (connect, read) seconds
+    TIMEOUT = (4, 8)
 
     # ── Init ───────────────────────────────────────────────────────────────────
 
@@ -165,11 +147,6 @@ class BaleBotService:
 
     @classmethod
     def _get_redis_client(cls) -> redis.Redis:
-        """
-        Return a process-level Redis client singleton.
-        max_connections caps the pool per worker process so we never
-        exhaust Redis connections under high concurrency.
-        """
         if cls._redis_client is None:
             cls._redis_client = redis.Redis.from_url(
                 settings.CELERY_BROKER_URL,
@@ -230,10 +207,9 @@ class BaleBotService:
 
     def _raw_check_joined(self, chat_id: int) -> bool:
         """
-        Makes live Bale API calls — always run from a SLOW Celery task,
-        never from the HTTP request handler.
-        Fail-open: on any API/network error return True so legitimate users
-        are never blocked by a transient hiccup.
+        Makes live Bale API calls — always run from a SLOW Celery task.
+        Fail-open on any API/network error so legitimate users are never
+        blocked by a transient hiccup.
         """
         allowed = {"creator", "administrator", "member"}
         try:
@@ -255,10 +231,19 @@ class BaleBotService:
         """
         Cache-only membership check — NEVER makes a live API call.
 
-        On a cache miss we return False and let the user tap '✅ عضو شدم',
-        which fires check_joined_and_respond_task (slow queue) where the
-        real Bale API call happens.  This keeps the fast queue non-blocking.
+        FIX: if no SupportChannels are configured, return True immediately
+        (cached for 5 min so we don't hit DB every request).
+        On a cache miss for the user we return False and let them tap
+        '✅ عضو شدم', which fires check_joined_and_respond_task (slow queue).
         """
+        # Fast-path: are there any channels at all?
+        channels_exist = cache.get("support_channels_exist")
+        if channels_exist is None:
+            channels_exist = SupportChannel.objects.exists()
+            cache.set("support_channels_exist", channels_exist, timeout=300)
+        if not channels_exist:
+            return True
+
         cached = cache.get(f"support_joined:{chat_id}")
         if cached is not None:
             return bool(cached)
@@ -271,31 +256,17 @@ class BaleBotService:
     # ── Anonymous queue — Redis List implementation ────────────────────────────
 
     def enqueue_user_for_pref(self, bale_id: int, pref: str) -> bool:
-        """
-        Push the user onto the queue for their pref.
-        Also maintains a companion SET for O(1) membership checks.
-        Returns False if they are already in that queue (idempotent).
-        """
         key        = _pref_to_own_queue_key(pref)
         member_key = f"{key}:members"
         r          = self._r
-
-        # Atomic: only add if not already a member
         if not r.sadd(member_key, str(bale_id)):
-            return False   # already queued
-
+            return False
         r.expire(member_key, ANON_QUEUE_TTL + 60)
         r.rpush(key, str(bale_id))
         r.expire(key, ANON_QUEUE_TTL + 60)
         return True
 
     def dequeue_partner_for_pref(self, my_bale_id: int, pref: str) -> Optional[int]:
-        """
-        Atomically pop a waiting partner from the OPPOSITE queue.
-        Skips if the popped ID equals our own (edge-case safety).
-        Cleans up the companion SET on successful pop.
-        Returns the partner's bale_id or None.
-        """
         partner_key        = _pref_to_queue_key(pref)
         partner_member_key = f"{partner_key}:members"
         try:
@@ -306,7 +277,6 @@ class BaleBotService:
                 str(my_bale_id),
             )
             if result:
-                # Clean up membership SET for the popped partner
                 self._r.srem(partner_member_key, result)
                 return int(result)
             return None
@@ -315,7 +285,6 @@ class BaleBotService:
             return None
 
     def is_in_queue(self, bale_id: int, pref: str) -> bool:
-        """Return True if the user is currently waiting in their queue. O(1) via SET."""
         key        = _pref_to_own_queue_key(pref)
         member_key = f"{key}:members"
         try:
@@ -324,7 +293,6 @@ class BaleBotService:
             return False
 
     def remove_from_queue(self, bale_id: int, pref: str):
-        """Remove a specific user from the queue and membership set (cancel or timeout)."""
         key        = _pref_to_own_queue_key(pref)
         member_key = f"{key}:members"
         try:
@@ -334,7 +302,6 @@ class BaleBotService:
             logger.exception("remove_from_queue failed for %s pref=%s", bale_id, pref)
 
     def queue_length(self, pref: str) -> int:
-        """How many users are currently waiting for this pref (for monitoring)."""
         key = _pref_to_own_queue_key(pref)
         try:
             return self._r.llen(key)
@@ -470,8 +437,81 @@ class BaleBotService:
             "inline_keyboard": [
                 [{"text": "✏️ ویرایش پروفایل",     "callback_data": "edit_profile"}],
                 [{"text": "📷 تغییر عکس پروفایل", "callback_data": "change_profile_pic"}],
+                [{"text": "🔗 کد معرفی من",        "callback_data": "show_referral"}],
             ]
         }
+
+    # ── Search menus ───────────────────────────────────────────────────────────
+
+    def get_fs_gender_menu(self) -> dict:
+        """Featured search — step 1: gender preference."""
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "👦 پسرها",       "callback_data": "fs_g_boys"},
+                    {"text": "👧 دخترها",      "callback_data": "fs_g_girls"},
+                ],
+                [{"text": "🤝 فرقی ندارم",    "callback_data": "fs_g_any"}],
+                [{"text": "❌ انصراف",         "callback_data": "search_cancel"}],
+            ]
+        }
+
+    def get_fs_location_menu(self) -> dict:
+        """Featured search — step 2: location filter."""
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "🏡 همشهری",        "callback_data": "fs_l_city"},
+                    {"text": "🗺 هم‌استانی",     "callback_data": "fs_l_province"},
+                ],
+                [{"text": "🌍 همه‌جا",           "callback_data": "fs_l_any"}],
+                [{"text": "❌ انصراف",            "callback_data": "search_cancel"}],
+            ]
+        }
+
+    def get_simple_search_menu(self) -> dict:
+        """Simple search — pick a search type."""
+        return {
+            "inline_keyboard": [
+                [{"text": "🎂 هم‌سن‌ها",       "callback_data": "ss_ages"}],
+                [{"text": "🗺 هم‌استانی‌ها",   "callback_data": "ss_province"}],
+                [{"text": "👥 همشهری‌ها",       "callback_data": "ss_citizens"}],
+                [{"text": "🔎 جستجوی ویژه",    "callback_data": "featured_search"}],
+            ]
+        }
+
+    def get_user_profile_actions_menu(
+        self,
+        target_bale_id: int,
+        is_liked: bool,
+        is_following: bool,
+        is_blocked: bool,
+    ) -> dict:
+        """Inline buttons shown when viewing another user's profile."""
+        rows = []
+
+        if not is_blocked:
+            rows.append([
+                {"text": "💌 پیام مستقیم",  "callback_data": f"dm_user_{target_bale_id}"},
+                {"text": "🎭 درخواست چت",   "callback_data": f"chat_req_{target_bale_id}"},
+            ])
+            rows.append([
+                {
+                    "text": "💔 لغو لایک" if is_liked else "❤️ لایک",
+                    "callback_data": f"like_user_{target_bale_id}",
+                },
+                {
+                    "text": "➖ لغو دنبال‌کردن" if is_following else "➕ دنبال کردن",
+                    "callback_data": f"follow_user_{target_bale_id}",
+                },
+            ])
+
+        rows.append([{
+            "text": "✅ رفع مسدودی" if is_blocked else "🚫 مسدود کردن",
+            "callback_data": f"block_user_{target_bale_id}",
+        }])
+        rows.append([{"text": "🔙 بازگشت به نتایج", "callback_data": "search_back"}])
+        return {"inline_keyboard": rows}
 
     # ── Admin notification ─────────────────────────────────────────────────────
 
@@ -513,7 +553,11 @@ class BaleBotService:
     # ── Profile card ───────────────────────────────────────────────────────────
 
     @staticmethod
-    def format_profile_card(user, header: str = "👤 پروفایل کاربر") -> str:
+    def format_profile_card(
+        user,
+        header: str = "👤 پروفایل کاربر",
+        show_stats: bool = False,
+    ) -> str:
         from user.enums import GENDER_LABEL
         lines = [
             header,
@@ -523,5 +567,11 @@ class BaleBotService:
             f"🚻 جنسیت: {GENDER_LABEL.get(user.gender, '---')}",
             f"🗺 استان: {user.province.name if user.province else '---'}",
             f"🏡 شهر: {user.city.name if user.city else '---'}",
+            f"🔖 @{user.referral_code or '---'}",
         ]
+        if show_stats:
+            from user.models import ProfileLike, ProfileFollow
+            likes_count   = ProfileLike.objects.filter(liked=user).count()
+            follows_count = ProfileFollow.objects.filter(following=user).count()
+            lines.append(f"❤️ {likes_count} لایک  |  👥 {follows_count} دنبال‌کننده")
         return "\n".join(lines)

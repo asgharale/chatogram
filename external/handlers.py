@@ -22,20 +22,26 @@ from chat.models import ChatSession
 logger = logging.getLogger(__name__)
 
 # ── Cache TTLs ────────────────────────────────────────────────────────────────
-USER_STATE_TTL         = 3_600   # 1 h  — awaiting photo / receipt
-REFERRAL_CACHE_TTL     = 86_400  # 24 h — pending referral code
-ACTIVE_SESSION_CACHE_TTL = 120   # 2 min — ChatSession id per user
+USER_STATE_TTL           = 3_600  # 1 h  — awaiting photo / receipt / DM
+REFERRAL_CACHE_TTL       = 86_400 # 24 h — pending referral code
+ACTIVE_SESSION_CACHE_TTL = 120    # 2 min — ChatSession id per user
+SEARCH_STATE_TTL         = 3_600  # 1 h  — paginated search context
+
+# Search page size
+SEARCH_PAGE_SIZE = 10
 
 # Countdown after user joins anon queue → must be < ANON_QUEUE_TTL
-ANON_CHAT_COUNTDOWN = 7 * 60   # 7 min
+ANON_CHAT_COUNTDOWN = 7 * 60  # 7 min
 
 # Maps reply-keyboard button text → logical callback action
 REPLY_KB_COMMANDS = {
-    "👥 همشهری‌ها":  "get_related_citizens",
-    "🎂 هم‌سن‌ها":  "get_related_ages",
-    "🎭 چت ناشناس": "start_new_chat",
-    "👛 کیف پول":   "show_wallet",
-    "📸 پروفایل":   "view_profile",
+    "👥 همشهری‌ها":                "get_related_citizens",
+    "🎂 هم‌سن‌ها":                 "get_related_ages",
+    "🔗 به یه ناشناس وصلم کن!":   "start_new_chat",
+    "👛 کسب درآمد":               "show_wallet",
+    "📸 پروفایل":                  "view_profile",
+    "🔍 جستجو":                   "simple_search",
+    "🔎 جستجوی ویژه":             "featured_search",
 }
 
 
@@ -51,20 +57,26 @@ class BotHandlers:
         self.bot = bot
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Routing helpers
+    # Main router
     # ══════════════════════════════════════════════════════════════════════════
 
     def dispatch(self, user, chat_id: int, text, contact, photo, cb_data):
-        """
-        Main router — called from process_webhook_task after user upsert.
-        Mirrors the callback/message dispatch logic that was in views.py.
-        """
         from user.enums import GENDER_MAP
 
         # ── Message path ──────────────────────────────────────────────────────
         if text is not None and cb_data is None:
             if text.startswith("/start"):
-                # Already handled in process_webhook_task (needs `created` flag)
+                return
+
+            if text.startswith("/help"):
+                self.handle_help(user, chat_id)
+                return
+
+            if text.strip() == "/cancel":
+                cache.delete(f"user_state_{chat_id}")
+                from .tasks import send_message_task
+                send_message_task.delay(chat_id=chat_id, text="❌ عملیات لغو شد")
+                self.send_main_menu(chat_id)
                 return
 
             if contact:
@@ -77,6 +89,16 @@ class BotHandlers:
                     return
                 self.handle_photo_message(user, chat_id, photo)
                 return
+
+            # ── Check for pending DM state BEFORE reply-keyboard dispatch ─────
+            user_state = cache.get(f"user_state_{chat_id}")
+            if user_state and user_state.startswith("dm_to_"):
+                try:
+                    target_bale_id = int(user_state.split("dm_to_")[1])
+                    self.handle_dm_send(user, chat_id, text, target_bale_id)
+                    return
+                except (ValueError, IndexError):
+                    cache.delete(f"user_state_{chat_id}")
 
             # Reply-keyboard shortcuts map to callback actions
             if text in REPLY_KB_COMMANDS:
@@ -114,6 +136,7 @@ class BotHandlers:
                 self._send_support_gate(chat_id)
                 return
 
+            # ── Onboarding ────────────────────────────────────────────────────
             if cb_data in ("man_gender", "woman_gender", "unknown_gender"):
                 self.handle_gender_callback(user, chat_id, cb_data)
             elif cb_data.startswith("province_"):
@@ -124,16 +147,54 @@ class BotHandlers:
                 self.handle_age_callback(user, chat_id, cb_data)
             elif cb_data == "joined_supported":
                 self.handle_joined_supported(user, chat_id)
+
+            # ── Search ────────────────────────────────────────────────────────
+            elif cb_data == "featured_search":
+                self.handle_featured_search(user, chat_id)
+            elif cb_data.startswith("fs_g_"):
+                self.handle_fs_gender(user, chat_id, cb_data)
+            elif cb_data.startswith("fs_l_"):
+                self.handle_fs_location(user, chat_id, cb_data)
+            elif cb_data == "simple_search":
+                self.handle_simple_search(user, chat_id)
+            elif cb_data in ("ss_ages", "ss_citizens", "ss_province"):
+                self.handle_ss_action(user, chat_id, cb_data)
+            elif cb_data == "search_more":
+                self.handle_search_more(user, chat_id)
+            elif cb_data == "search_cancel":
+                self.send_main_menu(chat_id)
+            elif cb_data == "search_back":
+                self.handle_search_back(user, chat_id)
+
+            # ── Profile / social ──────────────────────────────────────────────
+            elif cb_data.startswith("view_user_"):
+                self.handle_view_user_profile(user, chat_id, cb_data)
+            elif cb_data.startswith("like_user_"):
+                self.handle_like_user(user, chat_id, cb_data)
+            elif cb_data.startswith("follow_user_"):
+                self.handle_follow_user(user, chat_id, cb_data)
+            elif cb_data.startswith("block_user_"):
+                self.handle_block_user(user, chat_id, cb_data)
+            elif cb_data.startswith("dm_user_"):
+                self.handle_dm_user(user, chat_id, cb_data)
+            elif cb_data.startswith("dm_reply_"):
+                self.handle_dm_reply(user, chat_id, cb_data)
+
+            # ── Discover (main-menu shortcuts) ────────────────────────────────
             elif cb_data == "get_related_citizens":
                 self.handle_related_citizens(user, chat_id)
             elif cb_data == "get_related_ages":
                 self.handle_related_ages(user, chat_id)
+
+            # ── Chat requests ─────────────────────────────────────────────────
             elif cb_data.startswith("chat_req_"):
                 self.handle_chat_request(user, chat_id, cb_data)
             elif cb_data.startswith("accept_chat_"):
                 self.handle_accept_chat(user, chat_id, cb_data)
             elif cb_data.startswith("reject_chat_"):
                 self.handle_reject_chat(user, chat_id, cb_data)
+
+            # ── Anonymous chat ────────────────────────────────────────────────
             elif cb_data == "start_new_chat":
                 self.handle_anon_chat(user, chat_id)
             elif cb_data in ("anon_pref_boys", "anon_pref_girls", "anon_pref_any"):
@@ -143,6 +204,8 @@ class BotHandlers:
                 parts = cb_data.split("_", 3)
                 pref  = parts[3] if len(parts) > 3 else "any"
                 self.handle_cancel_anon_queue(user, chat_id, pref)
+
+            # ── Wallet ────────────────────────────────────────────────────────
             elif cb_data == "show_wallet":
                 self.handle_wallet(user, chat_id)
             elif cb_data == "wallet_topup":
@@ -151,27 +214,31 @@ class BotHandlers:
                 self.handle_wallet_history(user, chat_id)
             elif cb_data.startswith("topup_"):
                 self.handle_topup_amount(user, chat_id, cb_data)
+
+            # ── Own profile ───────────────────────────────────────────────────
             elif cb_data == "view_profile":
                 self.handle_view_profile(user, chat_id)
             elif cb_data in ("set_profile_pic", "change_profile_pic"):
                 self.handle_set_profile_pic(user, chat_id)
             elif cb_data == "edit_profile":
-                # Re-trigger onboarding from current incomplete step
                 self.handle_start(user, chat_id, created=False)
             elif cb_data == "show_referral":
                 self.handle_referral(user, chat_id)
+
+            # ── Admin: deposits ───────────────────────────────────────────────
             elif cb_data.startswith("deposit_approve_"):
                 self.handle_deposit_approve(user, chat_id, cb_data)
             elif cb_data.startswith("deposit_reject_"):
                 self.handle_deposit_reject(user, chat_id, cb_data)
+
             else:
                 self.send_main_menu(chat_id)
+
         if photo and text is None and cb_data is None:
             if not self.bot.is_joined_supporteds(chat_id):
                 self._send_support_gate(chat_id)
                 return
             self.handle_photo_message(user, chat_id, photo)
-            return
 
     # ══════════════════════════════════════════════════════════════════════════
     # Internal helpers
@@ -186,14 +253,10 @@ class BotHandlers:
         )
 
     def _get_active_session(self, user) -> "ChatSession | None":
-        """
-        Returns the user's active ChatSession (status=1) or None.
-        Result is cached per user for ACTIVE_SESSION_CACHE_TTL seconds.
-        """
         from chat.models import ChatSession
 
         cache_key = f"active_session:{user.bale_id}"
-        cached = cache.get(cache_key)
+        cached    = cache.get(cache_key)
 
         if cached == "none":
             return None
@@ -236,10 +299,11 @@ class BotHandlers:
         profile_user,
         header: str = "👤 پروفایل کاربر",
         reply_markup: dict = None,
+        show_stats: bool = False,
     ):
         from .tasks import send_photo_caption_task, send_key_message_task, send_message_task
 
-        card_text = BaleBotService.format_profile_card(profile_user, header)
+        card_text = BaleBotService.format_profile_card(profile_user, header, show_stats)
 
         if profile_user.photo_file_id:
             send_photo_caption_task.delay(
@@ -276,6 +340,18 @@ class BotHandlers:
             return False
         return True
 
+    def _get_user_from_cb(self, cb_data: str, split_parts: int = 2):
+        """
+        Extract bale_id from callback data like 'verb_user_{bale_id}'
+        and return the UserProfile. Returns None on any error.
+        """
+        from user.models import UserProfile
+        try:
+            target_bale_id = int(cb_data.split("_", split_parts)[split_parts])
+            return UserProfile.objects.get(bale_id=target_bale_id)
+        except (UserProfile.DoesNotExist, ValueError, IndexError):
+            return None
+
     # ══════════════════════════════════════════════════════════════════════════
     # Referral helpers
     # ══════════════════════════════════════════════════════════════════════════
@@ -286,8 +362,6 @@ class BotHandlers:
         cache.set(f"pending_referral_{user.bale_id}", ref_code, timeout=REFERRAL_CACHE_TTL)
 
     def _process_referral_reward(self, user) -> None:
-        """Grant referral reward once the new user's profile is complete.
-        Uses select_for_update to prevent double-granting under concurrency."""
         if user.referral_rewarded or not user.has_complete_profile:
             return
 
@@ -326,9 +400,46 @@ class BotHandlers:
             chat_id=referrer.bale_id,
             text=(
                 f"🎉 دوستی که معرفی کردی پروفایلشو کامل کرد!\n"
-                f"💰 {REFERRAL_REWARD:,} سکه به کیف پولت اضافه شد. ممنون از معرفیت! 🙏"
+                f"💰 {REFERRAL_REWARD} سکه به کیف پولت اضافه شد. ممنون از معرفیت! 🙏"
             ),
         )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Help
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def handle_help(self, user, chat_id: int):
+        from .tasks import send_message_task
+        code = user.referral_code or "---"
+        text = (
+            "📖 راهنمای الوچت\n"
+            "═══════════════════\n\n"
+            "🔗 به یه ناشناس وصلم کن!\n"
+            "   با یک کاربر کاملاً ناشناس چت کن.\n\n"
+            "🔎 جستجوی ویژه\n"
+            "   جستجو با فیلتر جنسیت و موقعیت جغرافیایی.\n\n"
+            "🔍 جستجو\n"
+            "   پیدا کردن همشهری، هم‌استانی یا هم‌سن.\n\n"
+            "👥 همشهری‌ها\n"
+            "   لیست کاربران از شهر تو.\n\n"
+            "🎂 هم‌سن‌ها\n"
+            "   لیست کاربران هم‌سن (±۵ سال).\n\n"
+            "📸 پروفایل\n"
+            "   مشاهده، ویرایش اطلاعات و عکس پروفایل.\n\n"
+            "👛 کسب درآمد\n"
+            "   کیف پول، شارژ سکه و پاداش معرفی دوستان.\n\n"
+            "─────────────────────\n"
+            "💡 راهنمای سکه‌ها:\n"
+            f"• هدیه ثبت‌نام: {WELCOME_COINS} سکه 🎁\n"
+            f"• ارسال درخواست چت: {CHAT_REQUEST_COST} سکه\n"
+            f"• شروع چت (هر طرف): {CHAT_START_COST} سکه\n"
+            "• معرفی موفق دوست: سکه هدیه! 🎊\n\n"
+            "─────────────────────\n"
+            "🔖 لینک معرفی شما:\n"
+            f"https://ble.ir/alochatbot?start={code}\n\n"
+            "❓ سؤال یا مشکل داری؟ با ادمین تماس بگیر."
+        )
+        send_message_task.delay(chat_id=chat_id, text=text)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Onboarding
@@ -464,10 +575,6 @@ class BotHandlers:
             self.send_main_menu(chat_id)
 
     def handle_joined_supported(self, user, chat_id: int):
-        """
-        User tapped 'I joined'. Move the membership check to a Celery task
-        so we don't make live API calls in the webhook worker.
-        """
         from .tasks import check_joined_and_respond_task
         check_joined_and_respond_task.delay(chat_id)
 
@@ -498,7 +605,7 @@ class BotHandlers:
             f"💰 مجموع سکه کسب‌شده:  {total_earned:,} سکه\n\n"
             f"{'─' * 22}\n"
             f"📣 هر بار که دوستت از طریق لینک زیر وارد بشه\n"
-            f"و پروفایلشو کامل کنه، {REFERRAL_REWARD:,} سکه به حسابت واریز می‌شه!\n\n"
+            f"و پروفایلشو کامل کنه، {REFERRAL_REWARD} سکه به حسابت واریز می‌شه!\n\n"
             f"🔗 لینک معرفی شما:\n"
             f"https://ble.ir/alochatbot?start={code}"
         )
@@ -509,12 +616,12 @@ class BotHandlers:
         )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Profile
+    # Own profile
     # ══════════════════════════════════════════════════════════════════════════
 
     def handle_view_profile(self, user, chat_id: int):
         from .tasks import send_photo_caption_task, send_key_message_task
-        card   = BaleBotService.format_profile_card(user, header="📸 پروفایل من")
+        card   = BaleBotService.format_profile_card(user, header="📸 پروفایل من", show_stats=True)
         markup = self.bot.get_profile_menu()
 
         if user.photo_file_id:
@@ -555,7 +662,6 @@ class BotHandlers:
 
         state = cache.get(f"user_state_{chat_id}")
 
-        # ── Profile picture upload ────────────────────────────────────────────
         if state == "awaiting_profile_pic":
             user.photo_file_id = file_id
             user.save(update_fields=["photo_file_id"])
@@ -564,7 +670,6 @@ class BotHandlers:
             self.send_main_menu(chat_id)
             return
 
-        # ── Payment receipt upload ────────────────────────────────────────────
         if state and state.startswith("awaiting_receipt_"):
             parts = state.split("_")
             try:
@@ -588,11 +693,9 @@ class BotHandlers:
                     "⏳ پس از تأیید ادمین (معمولاً زیر ۳۰ دقیقه) سکه‌هایت شارژ می‌شه. 🙏"
                 ),
             )
-            # Notify admin via Celery — no blocking HTTP call here
             notify_admin_deposit_task.delay(deposit.id, is_photo=True)
             return
 
-        # ── Forward photo in active chat ──────────────────────────────────────
         active = self._get_active_session(user)
         if active:
             friend = active.user2 if active.user1 == user else active.user1
@@ -628,8 +731,6 @@ class BotHandlers:
             return
 
         deposit.approve()
-        logger.info("Deposit #%s approved by admin %s", deposit_id, chat_id)
-
         send_message_task.delay(
             chat_id=chat_id,
             text=f"✅ درخواست #{deposit_id} تأیید شد. {deposit.coins_to_add} سکه به کاربر اضافه شد."
@@ -666,8 +767,6 @@ class BotHandlers:
             return
 
         deposit.reject()
-        logger.info("Deposit #%s rejected by admin %s", deposit_id, chat_id)
-
         send_message_task.delay(chat_id=chat_id, text=f"❌ درخواست #{deposit_id} رد شد.")
         send_message_task.delay(
             chat_id=deposit.user.bale_id,
@@ -691,7 +790,7 @@ class BotHandlers:
             f"📋 هزینه‌ها:\n"
             f"• ارسال درخواست چت: {CHAT_REQUEST_COST} سکه\n"
             f"• شروع هر چت: {CHAT_START_COST} سکه (از هر طرف)\n\n"
-            f"🎁 هر معرفی موفق: +{REFERRAL_REWARD:,} سکه"
+            f"🎁 هر معرفی موفق: +{REFERRAL_REWARD} سکه"
         )
         send_key_message_task.delay(
             chat_id=chat_id,
@@ -758,7 +857,7 @@ class BotHandlers:
         send_message_task.delay(chat_id=chat_id, text=text)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Active chat  (forwarding messages between paired users)
+    # Active chat forwarding
     # ══════════════════════════════════════════════════════════════════════════
 
     def handle_active_chat(self, user, session, text: str = None):
@@ -774,71 +873,445 @@ class BotHandlers:
         )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Discover users
+    # Search — shared pagination engine
     # ══════════════════════════════════════════════════════════════════════════
 
-    def handle_related_citizens(self, user, chat_id: int):
-        from .tasks import send_message_task, send_key_message_task
-        from user.models import UserProfile
+    def _build_search_queryset(self, user, search_type: str, params: dict):
+        """
+        Returns a QuerySet of UserProfile ordered by newest first.
+        Excludes the requesting user and any bidirectional blocks.
+        """
+        from user.models import UserProfile, UserBlock
 
+        blocker_pks   = UserBlock.objects.filter(blocker=user).values_list('blocked_id', flat=True)
+        blocked_by_pks = UserBlock.objects.filter(blocked=user).values_list('blocker_id', flat=True)
+        exclude_pks   = set(blocker_pks) | set(blocked_by_pks) | {user.pk}
+
+        qs = (
+            UserProfile.objects
+            .exclude(pk__in=exclude_pks)
+            .filter(
+                gender__isnull=False,
+                province__isnull=False,
+                city__isnull=False,
+                age__isnull=False,
+            )
+            .select_related('city', 'province')
+            .order_by('-id')
+        )
+
+        if search_type == "ages":
+            qs = qs.filter(age__gte=user.age - 5, age__lte=user.age + 5)
+        elif search_type == "citizens":
+            qs = qs.filter(city=user.city)
+        elif search_type == "province":
+            qs = qs.filter(province=user.province)
+        elif search_type == "featured":
+            gender   = params.get("gender", "any")
+            location = params.get("location", "any")
+            if gender == "boys":
+                qs = qs.filter(gender=0)
+            elif gender == "girls":
+                qs = qs.filter(gender=1)
+            if location == "city" and user.city:
+                qs = qs.filter(city=user.city)
+            elif location == "province" and user.province:
+                qs = qs.filter(province=user.province)
+
+        return qs
+
+    def _show_search_page(
+        self,
+        user,
+        chat_id: int,
+        search_type: str,
+        params: dict,
+        offset: int,
+    ):
+        """
+        Fetches one page of search results and sends it.
+        Saves pagination state in cache so 'more' and 'back' work.
+        """
+        from .tasks import send_key_message_task, send_message_task
+        from user.models import ProfileLike
+
+        # Guard: ensure user has required data for this search type
+        missing = None
+        if search_type == "ages" and not user.age:
+            missing = "سنت رو هنوز ثبت نکردی ❗️"
+        elif search_type == "citizens" and not user.city:
+            missing = "شهرت رو هنوز ثبت نکردی ❗️"
+        elif search_type == "province" and not user.province:
+            missing = "استانت رو هنوز ثبت نکردی ❗️"
+        elif search_type == "featured" and not user.has_complete_profile:
+            missing = "برای جستجوی ویژه باید پروفایلت رو کامل کنی 😊"
+
+        if missing:
+            send_message_task.delay(chat_id=chat_id, text=missing)
+            if search_type == "featured":
+                self.handle_start(user, chat_id, created=False)
+            return
+
+        qs         = self._build_search_queryset(user, search_type, params)
+        total      = qs.count()
+        page_users = list(qs[offset: offset + SEARCH_PAGE_SIZE])
+
+        if not page_users:
+            msg = (
+                "😔 کاربری با این مشخصات پیدا نشد"
+                if offset == 0 else
+                "📭 دیگه کاربری برای نمایش نیست"
+            )
+            send_message_task.delay(chat_id=chat_id, text=msg)
+            return
+
+        # ── Build result text ─────────────────────────────────────────────────
+        TITLE = {
+            "featured":  "🔎 جستجوی ویژه",
+            "ages":      "🎂 هم‌سن‌ها",
+            "citizens":  "👥 همشهری‌ها",
+            "province":  "🗺 هم‌استانی‌ها",
+        }
+        page_num = offset // SEARCH_PAGE_SIZE + 1
+        lines    = [
+            f"{TITLE.get(search_type, '🔍 نتایج')} — صفحه {page_num}",
+            f"نمایش {offset + 1}–{min(offset + SEARCH_PAGE_SIZE, total)} از {total} نفر",
+            "─" * 24,
+        ]
+
+        # Pre-fetch like counts for this page in one query
+        page_pks        = [u.pk for u in page_users]
+        like_counts_raw = (
+            ProfileLike.objects
+            .filter(liked_id__in=page_pks)
+            .values('liked_id')
+        )
+        like_counts = {}
+        for row in like_counts_raw:
+            like_counts[row['liked_id']] = like_counts.get(row['liked_id'], 0) + 1
+
+        keyboard = []
+        for u in page_users:
+            city_name  = u.city.name if u.city else "---"
+            prov_name  = u.province.name if u.province else "---"
+            gender_lbl = {0: "آقا 🧑", 1: "خانم 👩"}.get(u.gender, "")
+            name       = u.first_name or "---"
+            likes      = like_counts.get(u.pk, 0)
+            lines.append(
+                f"👤 {name} | {u.age} سال | {gender_lbl}\n"
+                f"   📍 {prov_name}، {city_name} | 🔖 @{u.referral_code or '---'}\n"
+                f"   ❤️ {likes} لایک"
+            )
+            keyboard.append([{
+                "text": f"👁 {name}، {u.age} سال — {city_name}",
+                "callback_data": f"view_user_{u.bale_id}",
+            }])
+
+        # ── Pagination row ────────────────────────────────────────────────────
+        nav_row = []
+        if offset + SEARCH_PAGE_SIZE < total:
+            nav_row.append({"text": "📄 ۱۰ نفر بیشتر", "callback_data": "search_more"})
+        nav_row.append({"text": "❌ بازگشت", "callback_data": "search_cancel"})
+        keyboard.append(nav_row)
+
+        # ── Save state for pagination ─────────────────────────────────────────
+        cache.set(f"search_state:{chat_id}", {
+            "type":           search_type,
+            "current_offset": offset,
+            "params":         params,
+        }, timeout=SEARCH_STATE_TTL)
+
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            reply_markup={"inline_keyboard": keyboard},
+        )
+
+    # ── Featured search ────────────────────────────────────────────────────────
+
+    def handle_featured_search(self, user, chat_id: int):
+        from .tasks import send_key_message_task, send_message_task
+        if not user.has_complete_profile:
+            send_message_task.delay(
+                chat_id=chat_id,
+                text="برای جستجوی ویژه باید پروفایلت رو کامل کنی 😊",
+            )
+            self.handle_start(user, chat_id, created=False)
+            return
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text="🔎 جستجوی ویژه\n\nمی‌خوای با چه جنسیتی آشنا بشی؟",
+            reply_markup=self.bot.get_fs_gender_menu(),
+        )
+
+    def handle_fs_gender(self, user, chat_id: int, cb_data: str):
+        """Step 1 of featured search: user picked gender preference."""
+        from .tasks import send_key_message_task
+        gender = cb_data.replace("fs_g_", "")  # any | boys | girls
+        # Stash gender in cache; location step will read it
+        cache.set(f"fs_pending:{chat_id}", {"gender": gender}, timeout=600)
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text="📍 کجا دنبال آشنا می‌گردی؟",
+            reply_markup=self.bot.get_fs_location_menu(),
+        )
+
+    def handle_fs_location(self, user, chat_id: int, cb_data: str):
+        """Step 2 of featured search: user picked location preference."""
+        location = cb_data.replace("fs_l_", "")  # any | city | province
+        pending  = cache.get(f"fs_pending:{chat_id}") or {}
+        gender   = pending.get("gender", "any")
+        cache.delete(f"fs_pending:{chat_id}")
+        self._show_search_page(user, chat_id, "featured", {"gender": gender, "location": location}, 0)
+
+    # ── Simple search ──────────────────────────────────────────────────────────
+
+    def handle_simple_search(self, user, chat_id: int):
+        from .tasks import send_key_message_task
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text="🔍 جستجو — چی دنبال می‌گردی؟",
+            reply_markup=self.bot.get_simple_search_menu(),
+        )
+
+    def handle_ss_action(self, user, chat_id: int, cb_data: str):
+        TYPE_MAP = {
+            "ss_ages":     "ages",
+            "ss_citizens": "citizens",
+            "ss_province": "province",
+        }
+        search_type = TYPE_MAP.get(cb_data)
+        if search_type:
+            self._show_search_page(user, chat_id, search_type, {}, 0)
+
+    # ── Pagination controls ────────────────────────────────────────────────────
+
+    def handle_search_more(self, user, chat_id: int):
+        """Show the NEXT page of the current search."""
+        from .tasks import send_message_task
+        state = cache.get(f"search_state:{chat_id}")
+        if not state:
+            send_message_task.delay(chat_id=chat_id, text="⌛ جستجو منقضی شده. دوباره تلاش کن.")
+            return
+        next_offset = state["current_offset"] + SEARCH_PAGE_SIZE
+        self._show_search_page(
+            user, chat_id,
+            state["type"],
+            state.get("params", {}),
+            next_offset,
+        )
+
+    def handle_search_back(self, user, chat_id: int):
+        """Re-show the page the user was on before viewing a profile."""
+        from .tasks import send_message_task
+        state = cache.get(f"search_state:{chat_id}")
+        if not state:
+            self.send_main_menu(chat_id)
+            return
+        self._show_search_page(
+            user, chat_id,
+            state["type"],
+            state.get("params", {}),
+            state["current_offset"],
+        )
+
+    # ── Main-menu citizen / age shortcuts (now paginated) ──────────────────────
+
+    def handle_related_citizens(self, user, chat_id: int):
+        from .tasks import send_message_task
         if not user.city:
             send_message_task.delay(chat_id=chat_id, text="شهرت رو هنوز ثبت نکردی ❗️")
             return
-        related  = (
-            UserProfile.objects
-            .filter(city=user.city)
-            .exclude(bale_id=chat_id)
-            .only("bale_id", "first_name", "username", "photo_file_id")
-            [:20]
-        )
-        keyboard = self._create_user_list_keyboard(related)
-        if not keyboard:
-            send_message_task.delay(chat_id=chat_id, text="هنوز همشهری‌ای پیدا نشد 😔")
-            return
-        send_key_message_task.delay(
-            chat_id=chat_id,
-            text="همشهری‌های تو 👥:",
-            reply_markup={"inline_keyboard": keyboard},
-        )
+        self._show_search_page(user, chat_id, "citizens", {}, 0)
 
     def handle_related_ages(self, user, chat_id: int):
-        from .tasks import send_message_task, send_key_message_task
-        from user.models import UserProfile
-
+        from .tasks import send_message_task
         if not user.age:
             send_message_task.delay(chat_id=chat_id, text="سنت رو هنوز ثبت نکردی ❗️")
             return
-        related  = (
-            UserProfile.objects
-            .filter(age__gte=user.age - 5, age__lte=user.age + 5)
-            .exclude(bale_id=chat_id)
-            .only("bale_id", "first_name", "age", "photo_file_id")
-            [:20]
-        )
-        keyboard = self._create_user_list_keyboard(related, show_age=True)
-        if not keyboard:
-            send_message_task.delay(chat_id=chat_id, text="هنوز هم‌سنی پیدا نشد 😔")
+        self._show_search_page(user, chat_id, "ages", {}, 0)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # View another user's profile
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def handle_view_user_profile(self, user, chat_id: int, cb_data: str):
+        from .tasks import send_photo_caption_task, send_key_message_task, send_message_task
+        from user.models import UserProfile, ProfileLike, ProfileFollow, UserBlock
+
+        target = self._get_user_from_cb(cb_data, split_parts=2)
+        if not target:
+            send_message_task.delay(chat_id=chat_id, text="کاربر پیدا نشد ❌")
             return
-        send_key_message_task.delay(
-            chat_id=chat_id,
-            text="هم‌سن‌های تو 🎂:",
-            reply_markup={"inline_keyboard": keyboard},
+
+        if target.pk == user.pk:
+            self.handle_view_profile(user, chat_id)
+            return
+
+        is_liked     = ProfileLike.objects.filter(liker=user, liked=target).exists()
+        is_following = ProfileFollow.objects.filter(follower=user, following=target).exists()
+        is_blocked   = UserBlock.objects.filter(blocker=user, blocked=target).exists()
+
+        card   = BaleBotService.format_profile_card(target, header="👤 پروفایل کاربر", show_stats=True)
+        markup = self.bot.get_user_profile_actions_menu(
+            target.bale_id, is_liked, is_following, is_blocked
         )
 
-    def _create_user_list_keyboard(self, users, show_age=False):
-        kb    = []
-        users = list(users)
-        for i in range(0, len(users), 2):
-            row = []
-            for u in users[i : i + 2]:
-                label = (
-                    f"{u.first_name} - {u.age}"
-                    if show_age
-                    else f"{u.first_name} - {u.username or '---'}"
-                )
-                row.append({"text": label, "callback_data": f"chat_req_{u.bale_id}"})
-            kb.append(row)
-        return kb
+        if target.photo_file_id:
+            send_photo_caption_task.delay(
+                chat_id=chat_id,
+                file_id=target.photo_file_id,
+                caption=card,
+                reply_markup=markup,
+            )
+        else:
+            send_key_message_task.delay(chat_id=chat_id, text=card, reply_markup=markup)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Like / Follow / Block
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def handle_like_user(self, user, chat_id: int, cb_data: str):
+        from .tasks import send_message_task
+        from user.models import ProfileLike
+
+        target = self._get_user_from_cb(cb_data, split_parts=2)
+        if not target:
+            send_message_task.delay(chat_id=chat_id, text="کاربر پیدا نشد ❌")
+            return
+
+        like, created = ProfileLike.objects.get_or_create(liker=user, liked=target)
+        if created:
+            send_message_task.delay(chat_id=chat_id, text="❤️ لایک ثبت شد!")
+        else:
+            like.delete()
+            send_message_task.delay(chat_id=chat_id, text="💔 لایک برداشته شد")
+
+        # Refresh profile view with updated stats
+        self.handle_view_user_profile(user, chat_id, f"view_user_{target.bale_id}")
+
+    def handle_follow_user(self, user, chat_id: int, cb_data: str):
+        from .tasks import send_message_task
+        from user.models import ProfileFollow
+
+        target = self._get_user_from_cb(cb_data, split_parts=2)
+        if not target:
+            send_message_task.delay(chat_id=chat_id, text="کاربر پیدا نشد ❌")
+            return
+
+        follow, created = ProfileFollow.objects.get_or_create(follower=user, following=target)
+        if created:
+            send_message_task.delay(chat_id=chat_id, text="➕ دنبال کردی!")
+        else:
+            follow.delete()
+            send_message_task.delay(chat_id=chat_id, text="➖ دنبال کردن لغو شد")
+
+        self.handle_view_user_profile(user, chat_id, f"view_user_{target.bale_id}")
+
+    def handle_block_user(self, user, chat_id: int, cb_data: str):
+        from .tasks import send_message_task
+        from user.models import UserBlock
+
+        target = self._get_user_from_cb(cb_data, split_parts=2)
+        if not target:
+            send_message_task.delay(chat_id=chat_id, text="کاربر پیدا نشد ❌")
+            return
+
+        block = UserBlock.objects.filter(blocker=user, blocked=target).first()
+        if block:
+            block.delete()
+            send_message_task.delay(chat_id=chat_id, text="✅ مسدودی برداشته شد")
+            self.handle_view_user_profile(user, chat_id, f"view_user_{target.bale_id}")
+        else:
+            UserBlock.objects.create(blocker=user, blocked=target)
+            send_message_task.delay(chat_id=chat_id, text="🚫 کاربر مسدود شد")
+            self.send_main_menu(chat_id)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Direct message
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def handle_dm_user(self, user, chat_id: int, cb_data: str):
+        """User tapped 'پیام مستقیم' on someone's profile — set state and prompt."""
+        from .tasks import send_message_task
+        from user.models import UserBlock
+
+        target = self._get_user_from_cb(cb_data, split_parts=2)
+        if not target:
+            send_message_task.delay(chat_id=chat_id, text="کاربر پیدا نشد ❌")
+            return
+
+        if UserBlock.objects.filter(blocker=target, blocked=user).exists():
+            send_message_task.delay(chat_id=chat_id, text="❌ امکان ارسال پیام به این کاربر وجود ندارد")
+            return
+
+        cache.set(f"user_state_{chat_id}", f"dm_to_{target.bale_id}", timeout=USER_STATE_TTL)
+        name = target.first_name or f"@{target.referral_code or target.bale_id}"
+        send_message_task.delay(
+            chat_id=chat_id,
+            text=(
+                f"💌 پیام خود را برای {name} بنویسید:\n"
+                "(برای انصراف /cancel بزنید)"
+            ),
+        )
+
+    def handle_dm_send(self, user, chat_id: int, text: str, target_bale_id: int):
+        """Deliver the composed DM to the target user."""
+        from .tasks import send_message_task, send_key_message_task
+        from user.models import UserProfile, UserBlock
+
+        try:
+            target = UserProfile.objects.get(bale_id=target_bale_id)
+        except UserProfile.DoesNotExist:
+            cache.delete(f"user_state_{chat_id}")
+            send_message_task.delay(chat_id=chat_id, text="کاربر پیدا نشد ❌")
+            return
+
+        if UserBlock.objects.filter(blocker=target, blocked=user).exists():
+            cache.delete(f"user_state_{chat_id}")
+            send_message_task.delay(chat_id=chat_id, text="❌ امکان ارسال پیام وجود ندارد")
+            return
+
+        sender_code = user.referral_code or str(chat_id)
+        dm_text = (
+            f"💌 پیام مستقیم از @{sender_code}\n"
+            f"{'─' * 20}\n"
+            f"{text}"
+        )
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "↩️ پاسخ دادن", "callback_data": f"dm_reply_{chat_id}"}
+            ]]
+        }
+        send_key_message_task.delay(chat_id=target_bale_id, text=dm_text, reply_markup=reply_markup)
+
+        cache.delete(f"user_state_{chat_id}")
+        send_message_task.delay(chat_id=chat_id, text="✅ پیامت ارسال شد!")
+        self.send_main_menu(chat_id)
+
+    def handle_dm_reply(self, user, chat_id: int, cb_data: str):
+        """Recipient taps 'پاسخ' — sets state to reply back to original sender."""
+        from .tasks import send_message_task
+        from user.models import UserProfile, UserBlock
+
+        target = self._get_user_from_cb(cb_data, split_parts=2)
+        if not target:
+            send_message_task.delay(chat_id=chat_id, text="کاربر پیدا نشد ❌")
+            return
+
+        if UserBlock.objects.filter(blocker=target, blocked=user).exists():
+            send_message_task.delay(chat_id=chat_id, text="❌ امکان ارسال پیام وجود ندارد")
+            return
+
+        cache.set(f"user_state_{chat_id}", f"dm_to_{target.bale_id}", timeout=USER_STATE_TTL)
+        name = target.first_name or f"@{target.referral_code or target.bale_id}"
+        send_message_task.delay(
+            chat_id=chat_id,
+            text=(
+                f"↩️ پاسخ به {name}:\n"
+                "(برای انصراف /cancel بزنید)"
+            ),
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Direct chat request
@@ -846,7 +1319,7 @@ class BotHandlers:
 
     def handle_chat_request(self, user, chat_id: int, cb_data: str):
         from .tasks import send_message_task, send_key_message_task
-        from user.models import UserProfile
+        from user.models import UserProfile, UserBlock
         from chat.models import ChatSession
 
         try:
@@ -858,6 +1331,11 @@ class BotHandlers:
 
         if user.bale_id == user2.bale_id:
             send_message_task.delay(chat_id=chat_id, text="نمی‌تونی با خودت چت کنی 😄")
+            return
+
+        # Block guard: target has blocked the requester
+        if UserBlock.objects.filter(blocker=user2, blocked=user).exists():
+            send_message_task.delay(chat_id=chat_id, text="❌ امکان ارسال درخواست به این کاربر وجود ندارد")
             return
 
         if ChatSession.objects.filter(
@@ -876,6 +1354,7 @@ class BotHandlers:
             target_chat_id=user2.bale_id,
             profile_user=user,
             header="👋 یک نفر درخواست چت داده!",
+            show_stats=True,
         )
         send_key_message_task.delay(
             chat_id=user2.bale_id,
@@ -916,8 +1395,6 @@ class BotHandlers:
                 )
                 return
 
-        # Deduct coins atomically — deduct_coins uses select_for_update internally,
-        # so this is the authoritative check. No pre-flight balance read needed.
         if not user.deduct_coins(CHAT_START_COST, "شروع چت"):
             send_key_message_task.delay(
                 chat_id=chat_id,
@@ -932,7 +1409,6 @@ class BotHandlers:
             return
 
         if not requester.deduct_coins(CHAT_START_COST, "شروع چت"):
-            # Requester is short — refund user immediately
             user.add_coins(CHAT_START_COST, "بازگشت سکه — طرف مقابل موجودی کافی ندارد")
             send_key_message_task.delay(
                 chat_id=requester.bale_id,
@@ -952,26 +1428,17 @@ class BotHandlers:
 
         session.status = 1
         session.save()
-
-        # Invalidate session cache for both users
         self._invalidate_session_cache(chat_id, requester.bale_id)
 
         end_menu  = self.bot.get_in_session_menu(session)
         start_msg = "✅ چت شروع شد! پروفایل طرف مقابل 👇\nبرای پایان چت از دکمه زیر استفاده کن."
 
-        self._send_profile_card(
-            target_chat_id=chat_id,
-            profile_user=requester,
-            header=start_msg,
-            reply_markup=end_menu,
-        )
+        self._send_profile_card(chat_id, requester, start_msg, end_menu)
         send_key_message_task.delay(chat_id=chat_id, text="پیام بفرست 💬", reply_markup=end_menu)
-
         self._send_profile_card(
-            target_chat_id=requester.bale_id,
-            profile_user=user,
-            header=f"🎉 {user.first_name or 'کاربر'} درخواستت رو قبول کرد!\n{start_msg}",
-            reply_markup=end_menu,
+            requester.bale_id, user,
+            f"🎉 {user.first_name or 'کاربر'} درخواستت رو قبول کرد!\n{start_msg}",
+            end_menu,
         )
         send_key_message_task.delay(chat_id=requester.bale_id, text="پیام بفرست 💬", reply_markup=end_menu)
 
@@ -1001,7 +1468,6 @@ class BotHandlers:
         session.end_date = timezone.now()
         session.save()
 
-        # Invalidate session cache for both participants
         ids_to_invalidate = [chat_id]
         if other:
             ids_to_invalidate.append(other.bale_id)
@@ -1044,19 +1510,16 @@ class BotHandlers:
             send_message_task.delay(chat_id=chat_id, text="شما در حال حاضر در یک چت فعال هستید ❌")
             return
 
-        # ── Try to match with a waiting partner ──────────────────────────────
         waiting_id = self.bot.dequeue_partner_for_pref(chat_id, pref)
 
         if waiting_id:
             try:
                 user2 = UserProfile.objects.get(bale_id=waiting_id)
             except UserProfile.DoesNotExist:
-                pass  # stale entry — fall through and re-queue
+                pass
             else:
-                # Check both users have enough coins
                 for u in (user, user2):
                     if u.get_wallet_balance() < CHAT_START_COST:
-                        # Put the waiting user back
                         self.bot.enqueue_user_for_pref(waiting_id, pref)
                         send_key_message_task.delay(
                             chat_id=u.bale_id,
@@ -1064,11 +1527,9 @@ class BotHandlers:
                                 f"❌ موجودی کافی نیست!\n"
                                 f"برای چت ناشناس {CHAT_START_COST} سکه لازم دارید."
                             ),
-                            reply_markup={
-                                "inline_keyboard": [[
-                                    {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
-                                ]]
-                            },
+                            reply_markup={"inline_keyboard": [[
+                                {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
+                            ]]},
                         )
                         return
 
@@ -1081,10 +1542,7 @@ class BotHandlers:
                 end_menu  = {"inline_keyboard": [[
                     {"text": "پایان چت ❌", "callback_data": f"reject_chat_{session.id}"}
                 ]]}
-                start_msg = (
-                    "🎉 یه نفر پیدا شد! چت ناشناس شروع شد.\n"
-                    "پروفایل طرف مقابل 👇"
-                )
+                start_msg = "🎉 یه نفر پیدا شد! چت ناشناس شروع شد.\nپروفایل طرف مقابل 👇"
 
                 self._send_profile_card(chat_id, user2, start_msg, end_menu)
                 send_key_message_task.delay(chat_id=chat_id, text="پیام بفرست 💬", reply_markup=end_menu)
@@ -1092,12 +1550,10 @@ class BotHandlers:
                 send_key_message_task.delay(chat_id=waiting_id, text="پیام بفرست 💬", reply_markup=end_menu)
                 return
 
-        # ── Already in this queue? ────────────────────────────────────────────
         if self.bot.is_in_queue(chat_id, pref):
             send_message_task.delay(chat_id=chat_id, text="هنوز در صف هستی، صبر کن 🔍")
             return
 
-        # ── Coin check before joining ─────────────────────────────────────────
         if user.get_wallet_balance() < CHAT_START_COST:
             send_key_message_task.delay(
                 chat_id=chat_id,
@@ -1112,13 +1568,8 @@ class BotHandlers:
             )
             return
 
-        # ── Join the queue ────────────────────────────────────────────────────
         self.bot.enqueue_user_for_pref(chat_id, pref)
-
-        anon_chat_timeout_task.apply_async(
-            args=[chat_id, pref],
-            countdown=ANON_CHAT_COUNTDOWN,
-        )
+        anon_chat_timeout_task.apply_async(args=[chat_id, pref], countdown=ANON_CHAT_COUNTDOWN)
 
         pref_label = {"boys": "👦 پسرها", "girls": "👧 دخترها"}.get(pref, "🎭 همه")
         send_key_message_task.delay(

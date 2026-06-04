@@ -41,8 +41,6 @@ class UserProfile(BaseModel):
             models.Index(fields=['city']),
             models.Index(fields=['age']),
             models.Index(fields=['referral_code']),
-            # FIX 5: composite index covers both citizens (city) and ages (age range) queries
-            # and avoids a separate index scan + filter step for each
             models.Index(fields=['city', 'age'], name='userprofile_city_age_idx'),
         ]
 
@@ -108,6 +106,12 @@ class UserProfile(BaseModel):
                 type=0,
                 description=description,
             )
+
+    def get_likes_count(self) -> int:
+        return ProfileLike.objects.filter(liked=self).count()
+
+    def get_followers_count(self) -> int:
+        return ProfileFollow.objects.filter(following=self).count()
 
     @property
     def has_complete_profile(self) -> bool:
@@ -197,3 +201,71 @@ class PendingDeposit(BaseModel):
             deposit.save(update_fields=["status", "reviewed_at"])
             self.status      = deposit.status
             self.reviewed_at = deposit.reviewed_at
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Social interaction models
+# These do NOT use BaseModel — no soft-delete needed; create/delete is correct.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ProfileLike(models.Model):
+    """A user liked another user's profile. Toggle by delete."""
+    liker      = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='given_likes'
+    )
+    liked      = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='received_likes'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table        = 'ProfileLikes'
+        unique_together = [['liker', 'liked']]
+        indexes         = [models.Index(fields=['liked'])]
+
+    def __str__(self):
+        return f"{self.liker} ❤️ {self.liked}"
+
+
+class ProfileFollow(models.Model):
+    """A user follows another user. Toggle by delete."""
+    follower   = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='following_set'
+    )
+    following  = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='followers_set'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table        = 'ProfileFollows'
+        unique_together = [['follower', 'following']]
+        indexes         = [models.Index(fields=['following'])]
+
+    def __str__(self):
+        return f"{self.follower} 👥 {self.following}"
+
+
+class UserBlock(models.Model):
+    """
+    Blocker cannot be contacted by blocked user (DMs, chat requests).
+    Blocked user does not appear in blocker's search results.
+    """
+    blocker    = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='blocks_given'
+    )
+    blocked    = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='blocks_received'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table        = 'UserBlocks'
+        unique_together = [['blocker', 'blocked']]
+        indexes         = [
+            models.Index(fields=['blocker']),
+            models.Index(fields=['blocked']),
+        ]
+
+    def __str__(self):
+        return f"{self.blocker} 🚫 {self.blocked}"
