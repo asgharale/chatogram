@@ -1132,9 +1132,9 @@ class BotHandlers:
                 vp_url = f"{BOT_DEEP_LINK}?start=vp_{u.bale_id}"
                 cr_url = f"{BOT_DEEP_LINK}?start=cr_{u.bale_id}"
                 entry_lines.append(
-                    f'   <a href="{vp_url}">👁 مشاهده پروفایل</a>'
+                    f'[👁 مشاهده پروفایل]({vp_url})'
                     f"  ·  "
-                    f'<a href="{cr_url}">🎭 درخواست چت</a>'
+                    f'[🎭 درخواست چت]({cr_url})'
                 )
 
             lines.append("\n".join(entry_lines))
