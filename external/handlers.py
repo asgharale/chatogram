@@ -1123,7 +1123,7 @@ class BotHandlers:
 
             entry_lines = [
                 f"👤 ** {name} **  |  {u.age} سال  |  {gender_lbl}",
-                f"   📍 {prov_name}، {city_name}  |  🔖 @{code}",
+                f"   📍 {prov_name}، {city_name}  |  🆔 @{code}",
                 f"   ❤️ {likes} لایک  |  {status}",
             ]
 
