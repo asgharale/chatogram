@@ -1105,11 +1105,13 @@ class BotHandlers:
             "province": "🗺 هم‌استانی‌ها",
         }
         page_num = offset // SEARCH_PAGE_SIZE + 1
-        lines = [
+        DIVIDER = "〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️"
+        header_lines = [
             f"** {TITLE.get(search_type, '🔍 نتایج')} **  —  صفحه {page_num}",
             f"نمایش {offset + 1}–{min(offset + SEARCH_PAGE_SIZE, total)} از {total} نفر",
             "─" * 22,
         ]
+        user_blocks = []
 
         for u in page_users:
             city_name  = _html.escape(u.city.name     if u.city     else "---")
@@ -1136,8 +1138,7 @@ class BotHandlers:
                     f"  ·  "
                     f'[🎭 درخواست چت]({cr_url})'
                 )
-
-            lines.append("\n 〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️ \n".join(entry_lines))
+            user_blocks.append("\n".join(entry_lines))
 
         # ── Navigation keyboard — no per-user buttons needed ──────────────────
         nav_row = []
@@ -1154,7 +1155,7 @@ class BotHandlers:
 
         send_key_message_task.delay(
             chat_id=chat_id,
-            text="\n".join(lines),
+            text="\n".join(header_lines) + "\n" + f"\n{DIVIDER}\n".join(user_blocks),
             reply_markup={"inline_keyboard": [nav_row]},
             parse_mode="HTML",
         )
