@@ -140,9 +140,38 @@ def process_webhook_task(self, raw_data: dict):
 
     # /start is special — needs the `created` flag
     if text and text.startswith("/start"):
-        parts    = text.strip().split(maxsplit=1)
-        ref_code = parts[1].strip() if len(parts) > 1 else None
-        handlers.handle_start(user, chat_id, created=created, ref_code=ref_code)
+        parts = text.strip().split(maxsplit=1)
+        param = parts[1].strip() if len(parts) > 1 else None
+
+        # ── Deep link: view profile ───────────────────────────────────────
+        if param and param.startswith("vp_"):
+            try:
+                target_bale_id = int(param[3:])
+            except (ValueError, IndexError):
+                pass
+            else:
+                if not created and user.has_complete_profile:
+                    handlers.handle_view_user_profile(user, chat_id, f"view_user_{target_bale_id}")
+                    return
+            # New / incomplete user — onboard first, skip referral from this link
+            handlers.handle_start(user, chat_id, created=created, ref_code=None)
+            return
+
+        # ── Deep link: direct chat request ────────────────────────────────
+        if param and param.startswith("cr_"):
+            try:
+                target_bale_id = int(param[3:])
+            except (ValueError, IndexError):
+                pass
+            else:
+                if not created and user.has_complete_profile:
+                    handlers.handle_chat_request(user, chat_id, f"chat_req_{target_bale_id}")
+                    return
+            handlers.handle_start(user, chat_id, created=created, ref_code=None)
+            return
+
+        # ── Normal /start (referral code or plain) ────────────────────────
+        handlers.handle_start(user, chat_id, created=created, ref_code=param)
         return
 
     try:
@@ -163,9 +192,9 @@ def process_webhook_task(self, raw_data: dict):
     default_retry_delay=5,
     name="external.tasks.send_message_task",
 )
-def send_message_task(self, chat_id: int, text: str):
+def send_message_task(self, chat_id: int, text: str, parse_mode: str = None):
     from .services import BaleBotService
-    if BaleBotService().send_message(chat_id, text) is None:
+    if BaleBotService().send_message(chat_id, text, parse_mode) is None:
         raise self.retry(countdown=5 * (2 ** self.request.retries))
 
 
@@ -176,9 +205,9 @@ def send_message_task(self, chat_id: int, text: str):
     default_retry_delay=5,
     name="external.tasks.send_key_message_task",
 )
-def send_key_message_task(self, chat_id: int, text: str, reply_markup: dict):
+def send_key_message_task(self, chat_id: int, text: str, reply_markup: dict, parse_mode: str = None):
     from .services import BaleBotService
-    if BaleBotService().send_key_message(chat_id, text, reply_markup) is None:
+    if BaleBotService().send_key_message(chat_id, text, reply_markup, parse_mode) is None:
         raise self.retry(countdown=5 * (2 ** self.request.retries))
 
 

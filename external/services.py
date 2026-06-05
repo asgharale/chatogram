@@ -29,7 +29,8 @@ CHAT_START_COST    = 8
 WELCOME_COINS      = 15   # gift on first /start
 REFERRAL_REWARD    = 20   # coins granted to referrer when new user completes profile
 
-BOT_USERNAME = "alochatbot"
+BOT_USERNAME   = "alochatbot"
+BOT_DEEP_LINK  = f"https://ble.ir/{BOT_USERNAME}"   # base for inline deep links
 
 DEFAULT_TOPUP_PACKAGES = [
     {"tomans": 10_000, "coins": 50},
@@ -175,15 +176,17 @@ class BaleBotService:
 
     # ── Public send helpers ────────────────────────────────────────────────────
 
-    def send_message(self, chat_id: int, text: str):
-        return self.send("sendMessage", {"chat_id": chat_id, "text": text})
+    def send_message(self, chat_id: int, text: str, parse_mode: str = None):
+        payload = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        return self.send("sendMessage", payload)
 
-    def send_key_message(self, chat_id: int, text: str, reply_markup: dict):
-        return self.send("sendMessage", {
-            "chat_id":      chat_id,
-            "text":         text,
-            "reply_markup": reply_markup,
-        })
+    def send_key_message(self, chat_id: int, text: str, reply_markup: dict, parse_mode: str = None):
+        payload = {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        return self.send("sendMessage", payload)
 
     def send_photo(self, chat_id: int, file_id: str):
         return self.send("sendPhoto", {"chat_id": chat_id, "photo": file_id})
@@ -474,10 +477,8 @@ class BaleBotService:
         """Simple search — pick a search type."""
         return {
             "inline_keyboard": [
-                [{"text": "🎂 هم‌سن‌ها",       "callback_data": "ss_ages"}],
-                [{"text": "🗺 هم‌استانی‌ها",   "callback_data": "ss_province"}],
-                [{"text": "👥 همشهری‌ها",       "callback_data": "ss_citizens"}],
-                [{"text": "🔎 جستجوی ویژه",    "callback_data": "featured_search"}],
+                [{"text": "🎂 هم‌سن‌ها",       "callback_data": "ss_ages"}, {"text": "🔎 جستجوی ویژه", "callback_data": "featured_search"}],
+                [{"text": "🗺 هم‌استانی‌ها",   "callback_data": "ss_province"}, {"text": "👥 همشهری‌ها", "callback_data": "ss_citizens"}]
             ]
         }
 

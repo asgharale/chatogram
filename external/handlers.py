@@ -16,6 +16,7 @@ from .services import (
     WELCOME_COINS,
     REFERRAL_REWARD,
     ANON_QUEUE_TTL,
+    BOT_DEEP_LINK,
 )
 from chat.models import ChatSession
 
@@ -1029,18 +1030,23 @@ class BotHandlers:
         offset: int,
     ):
         """
-        Fetches one page of search results and sends it.
-        Each entry shows: name, age, gender, city, @code, likes, online status.
-        Users currently in an active chat get no action buttons (they are listed
-        in the text but the keyboard only shows navigation rows).
-        Saves pagination state in cache so 'more' and 'back' work correctly.
+        Fetches one page of search results and sends an HTML-formatted message.
+
+        Each user entry contains inline deep links so no per-user keyboard
+        buttons are needed:
+          👁 مشاهده پروفایل  → BOT_DEEP_LINK?start=vp_{bale_id}
+          🎭 درخواست چت      → BOT_DEEP_LINK?start=cr_{bale_id}
+
+        Users currently in an active chat are listed in text only (no links).
+        The inline keyboard only carries pagination: [بیشتر] [بازگشت].
         """
+        import html as _html
         from .tasks import send_key_message_task, send_message_task
         from user.models import ProfileLike
         from chat.models import ChatSession
         from django.db.models import Q
 
-        # ── Guard: user must have the data needed for this search type ────────
+        # ── Guard: required data for this search type ─────────────────────────
         missing = None
         if search_type == "ages" and not user.age:
             missing = "سنت رو هنوز ثبت نکردی ❗️"
@@ -1070,10 +1076,10 @@ class BotHandlers:
             send_message_task.delay(chat_id=chat_id, text=msg)
             return
 
-        page_pks   = [u.pk for u in page_users]
-        bale_ids   = [u.bale_id for u in page_users]
+        page_pks = [u.pk for u in page_users]
+        bale_ids = [u.bale_id for u in page_users]
 
-        # ── Batch: like counts ────────────────────────────────────────────────
+        # ── Batch: like counts (one query) ────────────────────────────────────
         like_counts: dict = {}
         for row in ProfileLike.objects.filter(liked_id__in=page_pks).values("liked_id"):
             like_counts[row["liked_id"]] = like_counts.get(row["liked_id"], 0) + 1
@@ -1084,14 +1090,14 @@ class BotHandlers:
             .filter(Q(user1_id__in=page_pks) | Q(user2_id__in=page_pks), status=1)
             .values_list("user1_id", "user2_id")
         )
-        page_pk_set  = set(page_pks)
-        in_chat_pks  = {pk for pair in in_chat_sessions for pk in pair if pk in page_pk_set}
+        page_pk_set = set(page_pks)
+        in_chat_pks = {pk for pair in in_chat_sessions for pk in pair if pk in page_pk_set}
 
-        # ── Batch: online status (multi-get from cache) ───────────────────────
+        # ── Batch: online status (cache multi-get) ────────────────────────────
         online_cache    = cache.get_many([f"online:{bid}" for bid in bale_ids])
         online_bale_ids = {int(k.split(":")[1]) for k, v in online_cache.items() if v}
 
-        # ── Build text ────────────────────────────────────────────────────────
+        # ── Build HTML message ────────────────────────────────────────────────
         TITLE = {
             "featured": "🔎 جستجوی ویژه",
             "ages":     "🎂 هم‌سن‌ها",
@@ -1100,46 +1106,44 @@ class BotHandlers:
         }
         page_num = offset // SEARCH_PAGE_SIZE + 1
         lines = [
-            f"{TITLE.get(search_type, '🔍 نتایج')} — صفحه {page_num}",
+            f"<b>{TITLE.get(search_type, '🔍 نتایج')}</b>  —  صفحه {page_num}",
             f"نمایش {offset + 1}–{min(offset + SEARCH_PAGE_SIZE, total)} از {total} نفر",
-            "─" * 24,
+            "─" * 22,
         ]
 
-        keyboard = []
         for u in page_users:
-            city_name   = u.city.name     if u.city     else "---"
-            prov_name   = u.province.name if u.province else "---"
-            gender_lbl  = {0: "آقا 🧑", 1: "خانم 👩"}.get(u.gender, "")
-            name        = u.first_name or "---"
-            likes       = like_counts.get(u.pk, 0)
-            status      = self._get_user_status_label(u, in_chat_pks, online_bale_ids)
-            is_in_chat  = u.pk in in_chat_pks
+            city_name  = _html.escape(u.city.name     if u.city     else "---")
+            prov_name  = _html.escape(u.province.name if u.province else "---")
+            gender_lbl = {0: "آقا 🧑", 1: "خانم 👩"}.get(u.gender, "")
+            name       = _html.escape(u.first_name or "---")
+            code       = u.referral_code or "---"
+            likes      = like_counts.get(u.pk, 0)
+            status     = self._get_user_status_label(u, in_chat_pks, online_bale_ids)
+            in_chat    = u.pk in in_chat_pks
 
-            lines.append(
-                f"👤 {name} | {u.age} سال | {gender_lbl}\n"
-                f"   📍 {prov_name}، {city_name} | 🔖 @{u.referral_code or '---'}\n"
-                f"   ❤️ {likes} لایک  |  {status}"
-            )
+            entry_lines = [
+                f"👤 <b>{name}</b>  |  {u.age} سال  |  {gender_lbl}",
+                f"   📍 {prov_name}، {city_name}  |  🔖 @{code}",
+                f"   ❤️ {likes} لایک  |  {status}",
+            ]
 
-            # Available users get two action buttons; in-chat users get none
-            if not is_in_chat:
-                keyboard.append([
-                    {
-                        "text":          f"👁 {name}، {u.age}",
-                        "callback_data": f"view_user_{u.bale_id}",
-                    },
-                    {
-                        "text":          f"🎭 درخواست چت",
-                        "callback_data": f"chat_req_{u.bale_id}",
-                    },
-                ])
+            # Tappable deep links — omitted when user is already in a chat
+            if not in_chat:
+                vp_url = f"{BOT_DEEP_LINK}?start=vp_{u.bale_id}"
+                cr_url = f"{BOT_DEEP_LINK}?start=cr_{u.bale_id}"
+                entry_lines.append(
+                    f'   <a href="{vp_url}">👁 مشاهده پروفایل</a>'
+                    f"  ·  "
+                    f'<a href="{cr_url}">🎭 درخواست چت</a>'
+                )
 
-        # ── Pagination row ────────────────────────────────────────────────────
+            lines.append("\n".join(entry_lines))
+
+        # ── Navigation keyboard — no per-user buttons needed ──────────────────
         nav_row = []
         if offset + SEARCH_PAGE_SIZE < total:
             nav_row.append({"text": "📄 ۱۰ نفر بیشتر", "callback_data": "search_more"})
         nav_row.append({"text": "❌ بازگشت", "callback_data": "search_cancel"})
-        keyboard.append(nav_row)
 
         # ── Save pagination state ─────────────────────────────────────────────
         cache.set(f"search_state:{chat_id}", {
@@ -1151,7 +1155,8 @@ class BotHandlers:
         send_key_message_task.delay(
             chat_id=chat_id,
             text="\n".join(lines),
-            reply_markup={"inline_keyboard": keyboard},
+            reply_markup={"inline_keyboard": [nav_row]},
+            parse_mode="HTML",
         )
 
 
