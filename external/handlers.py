@@ -1106,7 +1106,7 @@ class BotHandlers:
         }
         page_num = offset // SEARCH_PAGE_SIZE + 1
         lines = [
-            f"<b>{TITLE.get(search_type, '🔍 نتایج')}</b>  —  صفحه {page_num}",
+            f"** {TITLE.get(search_type, '🔍 نتایج')} **  —  صفحه {page_num}",
             f"نمایش {offset + 1}–{min(offset + SEARCH_PAGE_SIZE, total)} از {total} نفر",
             "─" * 22,
         ]
@@ -1122,7 +1122,7 @@ class BotHandlers:
             in_chat    = u.pk in in_chat_pks
 
             entry_lines = [
-                f"👤 <b>{name}</b>  |  {u.age} سال  |  {gender_lbl}",
+                f"👤 ** {name} **  |  {u.age} سال  |  {gender_lbl}",
                 f"   📍 {prov_name}، {city_name}  |  🔖 @{code}",
                 f"   ❤️ {likes} لایک  |  {status}",
             ]
@@ -1137,7 +1137,7 @@ class BotHandlers:
                     f'[🎭 درخواست چت]({cr_url})'
                 )
 
-            lines.append("\n".join(entry_lines))
+            lines.append("\n 〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️ \n".join(entry_lines))
 
         # ── Navigation keyboard — no per-user buttons needed ──────────────────
         nav_row = []
