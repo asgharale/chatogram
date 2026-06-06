@@ -24,10 +24,10 @@ QUEUE_KEY_GIRLS = "anon_queue:girls"
 QUEUE_KEY_ANY   = "anon_queue:any"
 
 # ── Business constants ─────────────────────────────────────────────────────────
-CHAT_REQUEST_COST  = 2
-CHAT_START_COST    = 8
-WELCOME_COINS      = 15   # gift on first /start
-REFERRAL_REWARD    = 20   # coins granted to referrer when new user completes profile
+CHAT_REQUEST_COST    = 2
+CHAT_START_COST      = 8
+WELCOME_COINS        = 15        # gift coins on first /start
+REFERRAL_REWARD_TOMANS = 5_000  # Iranian Tomans awarded per successful referral
 
 BOT_USERNAME   = "alochatbot"
 BOT_DEEP_LINK  = f"https://ble.ir/{BOT_USERNAME}"   # base for inline deep links
@@ -441,7 +441,8 @@ class BaleBotService:
                 [{"text": "📝 تغییر نام",           "callback_data": "change_name"}],
                 [{"text": "✏️ ویرایش اطلاعات",     "callback_data": "edit_profile"}],
                 [{"text": "📷 تغییر عکس پروفایل",  "callback_data": "change_profile_pic"}],
-                [{"text": "🔗 کد معرفی من",         "callback_data": "show_referral"}],
+                [{"text": "🔗 لینک اشتراک‌گذاری",  "callback_data": "show_share_link"}],
+                [{"text": "💰 کد معرفی من",         "callback_data": "show_referral"}],
             ]
         }
 
@@ -473,12 +474,24 @@ class BaleBotService:
             ]
         }
 
+    def get_fs_age_menu(self) -> dict:
+        """Featured search — step 3: age range filter."""
+        return {
+            "inline_keyboard": [
+                [{"text": "🎂 هم‌سن‌ها (±۵ سال)",  "callback_data": "fs_a_same"}],
+                [{"text": "🌐 همه سنین",             "callback_data": "fs_a_any"}],
+                [{"text": "❌ انصراف",               "callback_data": "search_cancel"}],
+            ]
+        }
+
     def get_simple_search_menu(self) -> dict:
         """Simple search — pick a search type."""
         return {
             "inline_keyboard": [
-                [{"text": "🎂 هم‌سن‌ها",       "callback_data": "ss_ages"}, {"text": "🔎 جستجوی ویژه", "callback_data": "featured_search"}],
-                [{"text": "🗺 هم‌استانی‌ها",   "callback_data": "ss_province"}, {"text": "👥 همشهری‌ها", "callback_data": "ss_citizens"}]
+                [{"text": "🎂 هم‌سن‌ها",       "callback_data": "ss_ages"}],
+                [{"text": "🗺 هم‌استانی‌ها",   "callback_data": "ss_province"}],
+                [{"text": "👥 همشهری‌ها",       "callback_data": "ss_citizens"}],
+                [{"text": "🔎 جستجوی ویژه",    "callback_data": "featured_search"}],
             ]
         }
 

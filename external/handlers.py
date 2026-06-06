@@ -14,7 +14,7 @@ from .services import (
     CHAT_REQUEST_COST,
     CHAT_START_COST,
     WELCOME_COINS,
-    REFERRAL_REWARD,
+    REFERRAL_REWARD_TOMANS,
     ANON_QUEUE_TTL,
     BOT_DEEP_LINK,
 )
@@ -163,6 +163,8 @@ class BotHandlers:
                 self.handle_fs_gender(user, chat_id, cb_data)
             elif cb_data.startswith("fs_l_"):
                 self.handle_fs_location(user, chat_id, cb_data)
+            elif cb_data.startswith("fs_a_"):
+                self.handle_fs_age(user, chat_id, cb_data)
             elif cb_data == "simple_search":
                 self.handle_simple_search(user, chat_id)
             elif cb_data in ("ss_ages", "ss_citizens", "ss_province"):
@@ -232,6 +234,8 @@ class BotHandlers:
                 self.handle_change_name(user, chat_id)
             elif cb_data == "edit_profile":
                 self.handle_start(user, chat_id, created=False)
+            elif cb_data == "show_share_link":
+                self.handle_share_link(user, chat_id)
             elif cb_data == "show_referral":
                 self.handle_referral(user, chat_id)
 
@@ -392,6 +396,14 @@ class BotHandlers:
                 return "⚫ خیلی وقته"
         return "⚫ نامشخص"
 
+
+    @staticmethod
+    def _md_escape(text: str) -> str:
+        """Escape special chars for Telegram Markdown parse_mode."""
+        for ch in ('_', '*', '`', '['):
+            text = text.replace(ch, f'\\{ch}')
+        return text
+
     # ══════════════════════════════════════════════════════════════════════════
     # Referral helpers
     # ══════════════════════════════════════════════════════════════════════════
@@ -427,8 +439,8 @@ class BotHandlers:
             if locked.referral_rewarded:
                 return
             referrer = locked.referred_by
-            referrer.add_coins(
-                REFERRAL_REWARD,
+            referrer.add_tomans(
+                REFERRAL_REWARD_TOMANS,
                 f"پاداش معرفی کاربر {user.first_name or user.bale_id} 🎁",
             )
             locked.referral_rewarded = True
@@ -440,7 +452,7 @@ class BotHandlers:
             chat_id=referrer.bale_id,
             text=(
                 f"🎉 دوستی که معرفی کردی پروفایلشو کامل کرد!\n"
-                f"💰 {REFERRAL_REWARD} سکه به کیف پولت اضافه شد. ممنون از معرفیت! 🙏"
+                f"💵 {REFERRAL_REWARD_TOMANS:,} تومان به حسابت اضافه شد. ممنون از معرفیت! 🙏"
             ),
         )
 
@@ -457,7 +469,7 @@ class BotHandlers:
             "🔗 به یه ناشناس وصلم کن!\n"
             "   با یک کاربر کاملاً ناشناس چت کن.\n\n"
             "🔎 جستجوی ویژه\n"
-            "   جستجو با فیلتر جنسیت و موقعیت جغرافیایی.\n\n"
+            "   جستجو با فیلتر جنسیت، موقعیت و سن.\n\n"
             "🔍 جستجو\n"
             "   پیدا کردن همشهری، هم‌استانی یا هم‌سن.\n\n"
             "👥 همشهری‌ها\n"
@@ -465,15 +477,16 @@ class BotHandlers:
             "🎂 هم‌سن‌ها\n"
             "   لیست کاربران هم‌سن (±۵ سال).\n\n"
             "📸 پروفایل\n"
-            "   مشاهده، ویرایش اطلاعات و عکس پروفایل.\n\n"
+            "   مشاهده، ویرایش اطلاعات، عکس و لینک اشتراک‌گذاری.\n\n"
             "👛 کسب درآمد\n"
-            "   کیف پول، شارژ سکه و پاداش معرفی دوستان.\n\n"
+            "   کیف پول سکه، موجودی تومان و پاداش معرفی دوستان.\n\n"
             "─────────────────────\n"
-            "💡 راهنمای سکه‌ها:\n"
+            "💡 راهنمای سکه و تومان:\n"
             f"• هدیه ثبت‌نام: {WELCOME_COINS} سکه 🎁\n"
             f"• ارسال درخواست چت: {CHAT_REQUEST_COST} سکه\n"
             f"• شروع چت (هر طرف): {CHAT_START_COST} سکه\n"
-            "• معرفی موفق دوست: سکه هدیه! 🎊\n\n"
+            f"• چت ناشناس فرقی نمیکند: رایگان 🆓\n"
+            f"• معرفی موفق دوست: {REFERRAL_REWARD_TOMANS:,} تومان 💵\n\n"
             "─────────────────────\n"
             "🔖 لینک معرفی شما:\n"
             f"https://ble.ir/alochatbot?start={code}\n\n"
@@ -695,7 +708,8 @@ class BotHandlers:
         pending_count = UserProfile.objects.filter(
             referred_by=user, referral_rewarded=False, created_at__gte=cutoff
         ).count()
-        total_earned  = success_count * REFERRAL_REWARD
+        total_tomans  = success_count * REFERRAL_REWARD_TOMANS
+        toman_balance = user.get_toman_balance()
 
         text = (
             f"🔗 برنامه معرفی دوستان\n"
@@ -703,10 +717,11 @@ class BotHandlers:
             f"🏷 کد اختصاصی شما:  {code}\n\n"
             f"👥 معرفی‌های موفق:  {success_count} نفر\n"
             f"⏳ در انتظار تکمیل پروفایل (۷ روز اخیر):  {pending_count} نفر\n"
-            f"💰 مجموع سکه کسب‌شده:  {total_earned:,} سکه\n\n"
+            f"💵 مجموع تومان کسب‌شده:  {total_tomans:,} تومان\n"
+            f"💼 موجودی تومان کیف پول:  {toman_balance:,} تومان\n\n"
             f"{'─' * 22}\n"
             f"📣 هر بار که دوستت از طریق لینک زیر وارد بشه\n"
-            f"و پروفایلشو کامل کنه، {REFERRAL_REWARD} سکه به حسابت واریز می‌شه!\n\n"
+            f"و پروفایلشو کامل کنه، {REFERRAL_REWARD_TOMANS:,} تومان به حسابت واریز می‌شه!\n\n"
             f"🔗 لینک معرفی شما:\n"
             f"https://ble.ir/alochatbot?start={code}"
         )
@@ -742,6 +757,29 @@ class BotHandlers:
             "📸 عکس پروفایل فعلی رو داری. یه عکس جدید بفرست تا جایگزین بشه."
             if user.photo_file_id else
             "📸 عکس پروفایلت رو بفرست تا ذخیره بشه:"
+        )
+        send_message_task.delay(chat_id=chat_id, text=text)
+
+    def handle_share_link(self, user, chat_id: int):
+        """
+        Sends the user their two shareable deep links:
+          - Profile view link  → anyone can see profile + like/follow/request chat
+          - Direct chat link   → anyone can instantly send a chat request
+        Both can be pasted in groups, channels or personal bios.
+        """
+        from .tasks import send_message_task
+        bid  = user.bale_id
+        name = user.first_name or "کاربر"
+        vp   = f"{BOT_DEEP_LINK}?start=vp_{bid}"
+        cr   = f"{BOT_DEEP_LINK}?start=cr_{bid}"
+        text = (
+            f"🔗 لینک‌های اشتراک‌گذاری «{name}»\n"
+            f"{'─' * 24}\n\n"
+            f"👁 *مشاهده پروفایل:*\n{vp}\n\n"
+            f"💬 *درخواست چت مستقیم:*\n{cr}\n\n"
+            f"{'─' * 24}\n"
+            "📌 این لینک‌ها رو توی گروه‌ها، کانال‌ها یا بیوگرافیت به اشتراک بذار.\n"
+            "هر کسی که کلیک کنه مستقیم پروفایلت رو می‌بینه یا می‌تونه باهات چت شروع کنه 😊"
         )
         send_message_task.delay(chat_id=chat_id, text=text)
 
@@ -883,15 +921,18 @@ class BotHandlers:
 
     def handle_wallet(self, user, chat_id: int):
         from .tasks import send_key_message_task
-        balance = user.get_wallet_balance()
+        coins  = user.get_wallet_balance()
+        tomans = user.get_toman_balance()
         text = (
-            f"👛 کیف پول شما\n"
+            f"👛 کیف پول\n"
             f"{'─' * 22}\n"
-            f"💰 موجودی: {balance} سکه\n\n"
+            f"🪙 سکه: {coins} سکه\n"
+            f"💵 تومان: {tomans:,} تومان\n\n"
             f"📋 هزینه‌ها:\n"
             f"• ارسال درخواست چت: {CHAT_REQUEST_COST} سکه\n"
-            f"• شروع هر چت: {CHAT_START_COST} سکه (از هر طرف)\n\n"
-            f"🎁 هر معرفی موفق: +{REFERRAL_REWARD} سکه"
+            f"• شروع هر چت: {CHAT_START_COST} سکه (از هر طرف)\n"
+            f"• چت ناشناس «فرقی نمیکند»: رایگان 🆓\n\n"
+            f"🎁 هر معرفی موفق: +{REFERRAL_REWARD_TOMANS:,} تومان"
         )
         send_key_message_task.delay(
             chat_id=chat_id,
@@ -901,22 +942,33 @@ class BotHandlers:
 
     def handle_wallet_history(self, user, chat_id: int):
         from .tasks import send_message_task
-        from user.models import WalletTransaction, Wallet
+        from user.models import WalletTransaction, TomanTransaction, Wallet
         try:
             wallet = user.wallet
         except Wallet.DoesNotExist:
             send_message_task.delay(chat_id=chat_id, text="هنوز تراکنشی نداری 📭")
             return
 
-        txns = WalletTransaction.objects.filter(wallet=wallet).order_by("-created_at")[:10]
-        if not txns:
+        coin_txns  = WalletTransaction.objects.filter(wallet=wallet).order_by("-created_at")[:10]
+        toman_txns = TomanTransaction.objects.filter(wallet=wallet).order_by("-created_at")[:10]
+
+        if not coin_txns and not toman_txns:
             send_message_task.delay(chat_id=chat_id, text="هنوز تراکنشی نداری 📭")
             return
 
-        lines = ["📋 آخرین ۱۰ تراکنش:\n"]
-        for t in txns:
-            sign = "➕" if t.type == 0 else "➖"
-            lines.append(f"{sign} {t.amount} سکه — {t.description or ''}")
+        lines = [f"📋 آخرین تراکنش‌ها\n{'─' * 22}"]
+
+        if coin_txns:
+            lines.append("🪙 سکه:")
+            for t in coin_txns:
+                sign = "➕" if t.type == 0 else "➖"
+                lines.append(f"  {sign} {t.amount:,} سکه — {t.description or ''}")
+
+        if toman_txns:
+            lines.append("\n💵 تومان:")
+            for t in toman_txns:
+                lines.append(f"  ➕ {t.amount:,} تومان — {t.description or ''}")
+
         send_message_task.delay(chat_id=chat_id, text="\n".join(lines))
 
     def handle_topup(self, user, chat_id: int):
@@ -1008,16 +1060,22 @@ class BotHandlers:
         elif search_type == "province":
             qs = qs.filter(province=user.province)
         elif search_type == "featured":
-            gender   = params.get("gender", "any")
-            location = params.get("location", "any")
+            gender     = params.get("gender", "any")
+            location   = params.get("location", "any")
+            age_filter = params.get("age_filter", "any")   # "same" = ±5 yrs, "any" = all
+
             if gender == "boys":
                 qs = qs.filter(gender=0)
             elif gender == "girls":
                 qs = qs.filter(gender=1)
+
             if location == "city" and user.city:
                 qs = qs.filter(city=user.city)
             elif location == "province" and user.province:
                 qs = qs.filter(province=user.province)
+
+            if age_filter == "same" and user.age:
+                qs = qs.filter(age__gte=user.age - 5, age__lte=user.age + 5)
 
         return qs
 
@@ -1030,23 +1088,21 @@ class BotHandlers:
         offset: int,
     ):
         """
-        Fetches one page of search results and sends an HTML-formatted message.
+        Sends one page of search results as a Markdown-formatted message.
 
-        Each user entry contains inline deep links so no per-user keyboard
-        buttons are needed:
-          👁 مشاهده پروفایل  → BOT_DEEP_LINK?start=vp_{bale_id}
-          🎭 درخواست چت      → BOT_DEEP_LINK?start=cr_{bale_id}
+        Each available user entry contains tappable deep links:
+          [👁 مشاهده پروفایل](BOT_DEEP_LINK?start=vp_{bale_id})
+          [🎭 درخواست چت](BOT_DEEP_LINK?start=cr_{bale_id})
 
-        Users currently in an active chat are listed in text only (no links).
-        The inline keyboard only carries pagination: [بیشتر] [بازگشت].
+        Users in an active chat are listed without links.
+        The inline keyboard only carries navigation: [بیشتر] [بازگشت].
         """
-        import html as _html
         from .tasks import send_key_message_task, send_message_task
         from user.models import ProfileLike
         from chat.models import ChatSession
         from django.db.models import Q
 
-        # ── Guard: required data for this search type ─────────────────────────
+        # ── Guard ─────────────────────────────────────────────────────────────
         missing = None
         if search_type == "ages" and not user.age:
             missing = "سنت رو هنوز ثبت نکردی ❗️"
@@ -1079,12 +1135,12 @@ class BotHandlers:
         page_pks = [u.pk for u in page_users]
         bale_ids = [u.bale_id for u in page_users]
 
-        # ── Batch: like counts (one query) ────────────────────────────────────
+        # ── Batch: like counts ────────────────────────────────────────────────
         like_counts: dict = {}
         for row in ProfileLike.objects.filter(liked_id__in=page_pks).values("liked_id"):
             like_counts[row["liked_id"]] = like_counts.get(row["liked_id"], 0) + 1
 
-        # ── Batch: in-chat status (one query) ─────────────────────────────────
+        # ── Batch: in-chat status ─────────────────────────────────────────────
         in_chat_sessions = (
             ChatSession.objects
             .filter(Q(user1_id__in=page_pks) | Q(user2_id__in=page_pks), status=1)
@@ -1093,71 +1149,73 @@ class BotHandlers:
         page_pk_set = set(page_pks)
         in_chat_pks = {pk for pair in in_chat_sessions for pk in pair if pk in page_pk_set}
 
-        # ── Batch: online status (cache multi-get) ────────────────────────────
+        # ── Batch: online status ──────────────────────────────────────────────
         online_cache    = cache.get_many([f"online:{bid}" for bid in bale_ids])
         online_bale_ids = {int(k.split(":")[1]) for k, v in online_cache.items() if v}
 
-        # ── Build HTML message ────────────────────────────────────────────────
+        # ── Build Markdown message ────────────────────────────────────────────
         TITLE = {
             "featured": "🔎 جستجوی ویژه",
             "ages":     "🎂 هم‌سن‌ها",
             "citizens": "👥 همشهری‌ها",
             "province": "🗺 هم‌استانی‌ها",
         }
+        DIVIDER  = "〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️"
         page_num = offset // SEARCH_PAGE_SIZE + 1
-        DIVIDER = "〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️"
+
         header_lines = [
-            f"** {TITLE.get(search_type, '🔍 نتایج')} **  —  صفحه {page_num}",
+            f"*{TITLE.get(search_type, '🔍 نتایج')}*  —  صفحه {page_num}",
             f"نمایش {offset + 1}–{min(offset + SEARCH_PAGE_SIZE, total)} از {total} نفر",
             "─" * 22,
         ]
         user_blocks = []
 
         for u in page_users:
-            city_name  = _html.escape(u.city.name     if u.city     else "---")
-            prov_name  = _html.escape(u.province.name if u.province else "---")
+            city_name  = self._md_escape(u.city.name     if u.city     else "---")
+            prov_name  = self._md_escape(u.province.name if u.province else "---")
             gender_lbl = {0: "آقا 🧑", 1: "خانم 👩"}.get(u.gender, "")
-            name       = _html.escape(u.first_name or "---")
+            name       = self._md_escape(u.first_name or "---")
             code       = u.referral_code or "---"
             likes      = like_counts.get(u.pk, 0)
             status     = self._get_user_status_label(u, in_chat_pks, online_bale_ids)
             in_chat    = u.pk in in_chat_pks
 
             entry_lines = [
-                f"👤 ** {name} **  |  {u.age} سال  |  {gender_lbl}",
+                f"👤 *{name}*  |  {u.age} سال  |  {gender_lbl}",
                 f"   📍 {prov_name}، {city_name}  |  🆔 @{code}",
                 f"   ❤️ {likes} لایک  |  {status}",
             ]
 
-            # Tappable deep links — omitted when user is already in a chat
             if not in_chat:
                 vp_url = f"{BOT_DEEP_LINK}?start=vp_{u.bale_id}"
                 cr_url = f"{BOT_DEEP_LINK}?start=cr_{u.bale_id}"
                 entry_lines.append(
-                    f'[👁 مشاهده پروفایل]({vp_url})'
+                    f"   [👁 مشاهده پروفایل]({vp_url})"
                     f"  ·  "
-                    f'[🎭 درخواست چت]({cr_url})'
+                    f"[🎭 درخواست چت]({cr_url})"
                 )
+
             user_blocks.append("\n".join(entry_lines))
 
-        # ── Navigation keyboard — no per-user buttons needed ──────────────────
+        # ── Navigation keyboard ───────────────────────────────────────────────
         nav_row = []
         if offset + SEARCH_PAGE_SIZE < total:
             nav_row.append({"text": "📄 ۱۰ نفر بیشتر", "callback_data": "search_more"})
         nav_row.append({"text": "❌ بازگشت", "callback_data": "search_cancel"})
 
-        # ── Save pagination state ─────────────────────────────────────────────
         cache.set(f"search_state:{chat_id}", {
             "type":           search_type,
             "current_offset": offset,
             "params":         params,
         }, timeout=SEARCH_STATE_TTL)
 
+        full_text = "\n".join(header_lines) + "\n" + f"\n{DIVIDER}\n".join(user_blocks)
+
         send_key_message_task.delay(
             chat_id=chat_id,
-            text="\n".join(header_lines) + "\n" + f"\n{DIVIDER}\n".join(user_blocks),
+            text=full_text,
             reply_markup={"inline_keyboard": [nav_row]},
-            parse_mode="HTML",
+            parse_mode="Markdown",
         )
 
 
@@ -1189,12 +1247,30 @@ class BotHandlers:
         )
 
     def handle_fs_location(self, user, chat_id: int, cb_data: str):
-        """Step 2 of featured search: user picked location preference."""
-        location = cb_data.replace("fs_l_", "")  # any | city | province
+        """Step 2 of featured search: user picked location — save and ask age."""
+        from .tasks import send_key_message_task
+        location = cb_data.replace("fs_l_", "")       # any | city | province
         pending  = cache.get(f"fs_pending:{chat_id}") or {}
-        gender   = pending.get("gender", "any")
+        pending["location"] = location
+        cache.set(f"fs_pending:{chat_id}", pending, timeout=600)
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text="🎂 می‌خوای فقط هم‌سن‌هات (±۵ سال) رو ببینی یا همه سنین؟",
+            reply_markup=self.bot.get_fs_age_menu(),
+        )
+
+    def handle_fs_age(self, user, chat_id: int, cb_data: str):
+        """Step 3 of featured search: user picked age range — show results."""
+        age_filter = cb_data.replace("fs_a_", "")     # same | any
+        pending    = cache.get(f"fs_pending:{chat_id}") or {}
+        gender     = pending.get("gender",   "any")
+        location   = pending.get("location", "any")
         cache.delete(f"fs_pending:{chat_id}")
-        self._show_search_page(user, chat_id, "featured", {"gender": gender, "location": location}, 0)
+        self._show_search_page(
+            user, chat_id, "featured",
+            {"gender": gender, "location": location, "age_filter": age_filter},
+            0,
+        )
 
     # ── Simple search ──────────────────────────────────────────────────────────
 

@@ -109,6 +109,31 @@ class UserProfile(BaseModel):
                 description=description,
             )
 
+    def add_tomans(self, amount: int, description: str = "") -> None:
+        """Credit Iranian Tomans to this user's wallet (referral rewards, etc.)."""
+        with transaction.atomic():
+            wallet = (
+                Wallet.objects
+                .select_for_update()
+                .filter(user=self)
+                .first()
+            )
+            if wallet is None:
+                wallet = Wallet.objects.create(user=self, balance=0)
+            wallet.toman_balance = F("toman_balance") + amount
+            wallet.save(update_fields=["toman_balance"])
+            TomanTransaction.objects.create(
+                wallet=wallet,
+                amount=amount,
+                description=description,
+            )
+
+    def get_toman_balance(self) -> int:
+        try:
+            return self.wallet.toman_balance
+        except Wallet.DoesNotExist:
+            return 0
+
     def get_likes_count(self) -> int:
         return ProfileLike.objects.filter(liked=self).count()
 
@@ -126,16 +151,17 @@ class UserProfile(BaseModel):
 
 
 class Wallet(BaseModel):
-    user    = models.OneToOneField(
+    user          = models.OneToOneField(
         UserProfile, on_delete=models.CASCADE, related_name="wallet"
     )
-    balance = models.PositiveIntegerField(default=0)
+    balance       = models.PositiveIntegerField(default=0)   # coins
+    toman_balance = models.PositiveIntegerField(default=0)    # Iranian Tomans
 
     class Meta:
         db_table = "Wallets"
 
     def __str__(self):
-        return f"{self.user} — {self.balance} سکه"
+        return f"{self.user} — {self.balance} سکه  |  {self.toman_balance:,} تومان"
 
 
 class WalletTransaction(BaseModel):
@@ -152,6 +178,24 @@ class WalletTransaction(BaseModel):
     def __str__(self):
         sign = "+" if self.type == 0 else "-"
         return f"{sign}{self.amount} | {self.wallet.user}"
+
+
+class TomanTransaction(BaseModel):
+    """
+    Credit-only ledger for Iranian Tomans.
+    Tomans are earned via referrals and can later be withdrawn.
+    """
+    wallet      = models.ForeignKey(
+        Wallet, on_delete=models.CASCADE, related_name="toman_transactions"
+    )
+    amount      = models.PositiveIntegerField()   # always positive — credits only
+    description = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        db_table = "TomanTransactions"
+
+    def __str__(self):
+        return f"+{self.amount:,} تومان | {self.wallet.user}"
 
 
 class PendingDeposit(BaseModel):
