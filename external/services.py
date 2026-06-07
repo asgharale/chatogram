@@ -24,18 +24,26 @@ QUEUE_KEY_GIRLS = "anon_queue:girls"
 QUEUE_KEY_ANY   = "anon_queue:any"
 
 # ── Business constants ─────────────────────────────────────────────────────────
-CHAT_REQUEST_COST    = 2
-CHAT_START_COST      = 8
-WELCOME_COINS        = 15        # gift coins on first /start
-REFERRAL_REWARD_TOMANS = 5_000  # Iranian Tomans awarded per successful referral
+CHAT_REQUEST_COST    = 1     # sending a chat request (via profile / deep link)
+DM_COST              = 1     # sending a direct message via profile
+GENDER_FILTER_COST   = 2     # activating boys/girls filter in featured search (not "any")
+CHAT_START_COST      = 8     # per-side cost when an anon chat session starts
+WELCOME_COINS        = 15    # gift coins on first /start
+REFERRAL_REWARD_TOMANS = 5_000  # Iranian Tomans per successful referral
+
+# ── Coin sell-back rate ────────────────────────────────────────────────────────
+COIN_BUYBACK_UNIT   = 4_000      # minimum coins per sell-back transaction
+COIN_BUYBACK_TOMANS = 1_000_000  # tomans paid for COIN_BUYBACK_UNIT coins
 
 BOT_USERNAME   = "alochatbot"
 BOT_DEEP_LINK  = f"https://ble.ir/{BOT_USERNAME}"   # base for inline deep links
 
+# ── Coin purchase packages ─────────────────────────────────────────────────────
 DEFAULT_TOPUP_PACKAGES = [
-    {"tomans": 10_000, "coins": 50},
-    {"tomans": 20_000, "coins": 120},
-    {"tomans": 50_000, "coins": 320},
+    {"tomans": 140_000, "coins": 280},
+    {"tomans": 228_000, "coins": 510},
+    {"tomans": 468_000, "coins": 1_330},
+    {"tomans": 998_000, "coins": 3_330},
 ]
 
 ADMIN_CHAT_ID: int = int(os.environ.get("ADMIN_CHAT_ID", "0"))
@@ -389,8 +397,9 @@ class BaleBotService:
         return {
             "inline_keyboard": [
                 [{"text": "💳 شارژ کیف پول",       "callback_data": "wallet_topup"}],
-                [{"text": "📋 تاریخچه تراکنش‌ها",  "callback_data": "wallet_history"}],
-                [{"text": "🔗 کد معرفی من",         "callback_data": "show_referral"}],
+                [{"text": "💰 فروش سکه",            "callback_data": "sell_coins"}],
+                [{"text": "📋 تاریخچه تراکنش‌ها",   "callback_data": "wallet_history"}],
+                [{"text": "🔗 کد معرفی من",          "callback_data": "show_referral"}],
             ]
         }
 
@@ -461,16 +470,22 @@ class BaleBotService:
             ]
         }
 
-    def get_fs_location_menu(self) -> dict:
-        """Featured search — step 2: location filter."""
+    def get_fs_location_menu(self, age_active: bool = False) -> dict:
+        """Featured search — step 2: location filter + age toggle in one keyboard."""
+        age_btn = (
+            {"text": "✅ هم‌سن‌ها (±5 سال)", "callback_data": "fs_age_toggle"}
+            if age_active else
+            {"text": "❌ هم‌سن‌ها",           "callback_data": "fs_age_toggle"}
+        )
         return {
             "inline_keyboard": [
                 [
-                    {"text": "🏡 همشهری",        "callback_data": "fs_l_city"},
-                    {"text": "🗺 هم‌استانی",     "callback_data": "fs_l_province"},
+                    {"text": "🏡 همشهری",       "callback_data": "fs_l_city"},
+                    {"text": "🗺 هم‌استانی",    "callback_data": "fs_l_province"},
                 ],
-                [{"text": "🌍 همه‌جا",           "callback_data": "fs_l_any"}],
-                [{"text": "❌ انصراف",            "callback_data": "search_cancel"}],
+                [{"text": "🌍 همه‌جا",          "callback_data": "fs_l_any"}],
+                [age_btn],
+                [{"text": "❌ انصراف",           "callback_data": "search_cancel"}],
             ]
         }
 

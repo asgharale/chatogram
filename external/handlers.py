@@ -13,6 +13,10 @@ from .services import (
     BaleBotService,
     CHAT_REQUEST_COST,
     CHAT_START_COST,
+    DM_COST,
+    GENDER_FILTER_COST,
+    COIN_BUYBACK_UNIT,
+    COIN_BUYBACK_TOMANS,
     WELCOME_COINS,
     REFERRAL_REWARD_TOMANS,
     ANON_QUEUE_TTL,
@@ -100,6 +104,10 @@ class BotHandlers:
                 self.handle_name_input(user, chat_id, text)
                 return
 
+            if user_state and user_state.startswith("awaiting_bank_card_"):
+                self.handle_bank_card_input(user, chat_id, text, user_state)
+                return
+
             if user_state and user_state.startswith("dm_to_"):
                 try:
                     target_bale_id = int(user_state.split("dm_to_")[1])
@@ -163,8 +171,8 @@ class BotHandlers:
                 self.handle_fs_gender(user, chat_id, cb_data)
             elif cb_data.startswith("fs_l_"):
                 self.handle_fs_location(user, chat_id, cb_data)
-            elif cb_data.startswith("fs_a_"):
-                self.handle_fs_age(user, chat_id, cb_data)
+            elif cb_data == "fs_age_toggle":
+                self.handle_fs_age_toggle(user, chat_id)
             elif cb_data == "simple_search":
                 self.handle_simple_search(user, chat_id)
             elif cb_data in ("ss_ages", "ss_citizens", "ss_province"):
@@ -175,6 +183,8 @@ class BotHandlers:
                 self.send_main_menu(chat_id)
             elif cb_data == "search_back":
                 self.handle_search_back(user, chat_id)
+            elif cb_data == "fs_toggle_age":
+                self.handle_fs_toggle_age(user, chat_id)
 
             # ── Profile / social ──────────────────────────────────────────────
             elif cb_data.startswith("view_user_"):
@@ -224,6 +234,10 @@ class BotHandlers:
                 self.handle_wallet_history(user, chat_id)
             elif cb_data.startswith("topup_"):
                 self.handle_topup_amount(user, chat_id, cb_data)
+            elif cb_data == "sell_coins":
+                self.handle_sell_coins(user, chat_id)
+            elif cb_data.startswith("sc_"):
+                self.handle_sell_coins_amount(user, chat_id, cb_data)
 
             # ── Own profile ───────────────────────────────────────────────────
             elif cb_data == "view_profile":
@@ -1197,11 +1211,23 @@ class BotHandlers:
 
             user_blocks.append("\n".join(entry_lines))
 
-        # ── Navigation keyboard ───────────────────────────────────────────────
+        # ── Navigation keyboard — age toggle + pagination ─────────────────────
+        age_filter  = params.get("age_filter", "any")
+        toggle_icon = "✅" if age_filter == "same" else "❌"
+        toggle_btn  = {
+            "text":          f"{toggle_icon} هم‌سن‌ها (±5 سال)",
+            "callback_data": "fs_toggle_age",
+        }
+
         nav_row = []
         if offset + SEARCH_PAGE_SIZE < total:
             nav_row.append({"text": "📄 ۱۰ نفر بیشتر", "callback_data": "search_more"})
-        nav_row.append({"text": "❌ بازگشت", "callback_data": "search_cancel"})
+        nav_row.append({"text": "↩️ بازگشت", "callback_data": "search_cancel"})
+
+        keyboard = [
+            [toggle_btn],
+            nav_row,
+        ]
 
         cache.set(f"search_state:{chat_id}", {
             "type":           search_type,
@@ -1214,7 +1240,7 @@ class BotHandlers:
         send_key_message_task.delay(
             chat_id=chat_id,
             text=full_text,
-            reply_markup={"inline_keyboard": [nav_row]},
+            reply_markup={"inline_keyboard": keyboard},
             parse_mode="Markdown",
         )
 
@@ -1235,41 +1261,49 @@ class BotHandlers:
         )
 
     def handle_fs_gender(self, user, chat_id: int, cb_data: str):
-        """Step 1 of featured search: user picked gender preference."""
-        from .tasks import send_key_message_task
+        """Step 1 of featured search: user picked gender preference.
+        Choosing boys/girls costs GENDER_FILTER_COST coins; 'any' is free.
+        """
+        from .tasks import send_key_message_task, send_message_task
         gender = cb_data.replace("fs_g_", "")  # any | boys | girls
-        # Stash gender in cache; location step will read it
-        cache.set(f"fs_pending:{chat_id}", {"gender": gender}, timeout=600)
+
+        if gender != "any":
+            if not self._check_and_deduct(user, GENDER_FILTER_COST, "فیلتر جنسیت در جستجوی ویژه"):
+                return  # insufficient balance — message already sent by _check_and_deduct
+
+        cache.set(f"fs_pending:{chat_id}", {"gender": gender, "age_filter": "any"}, timeout=600)
         send_key_message_task.delay(
             chat_id=chat_id,
             text="📍 کجا دنبال آشنا می‌گردی؟",
-            reply_markup=self.bot.get_fs_location_menu(),
+            reply_markup=self.bot.get_fs_location_menu(age_active=False),
         )
 
     def handle_fs_location(self, user, chat_id: int, cb_data: str):
-        """Step 2 of featured search: user picked location — save and ask age."""
-        from .tasks import send_key_message_task
-        location = cb_data.replace("fs_l_", "")       # any | city | province
-        pending  = cache.get(f"fs_pending:{chat_id}") or {}
-        pending["location"] = location
-        cache.set(f"fs_pending:{chat_id}", pending, timeout=600)
-        send_key_message_task.delay(
-            chat_id=chat_id,
-            text="🎂 می‌خوای فقط هم‌سن‌هات (±۵ سال) رو ببینی یا همه سنین؟",
-            reply_markup=self.bot.get_fs_age_menu(),
-        )
-
-    def handle_fs_age(self, user, chat_id: int, cb_data: str):
-        """Step 3 of featured search: user picked age range — show results."""
-        age_filter = cb_data.replace("fs_a_", "")     # same | any
+        """Step 2 of featured search: location chosen — run search with stored age toggle."""
+        location   = cb_data.replace("fs_l_", "")          # any | city | province
         pending    = cache.get(f"fs_pending:{chat_id}") or {}
-        gender     = pending.get("gender",   "any")
-        location   = pending.get("location", "any")
+        gender     = pending.get("gender",     "any")
+        age_filter = pending.get("age_filter", "any")       # may have been toggled
         cache.delete(f"fs_pending:{chat_id}")
         self._show_search_page(
             user, chat_id, "featured",
             {"gender": gender, "location": location, "age_filter": age_filter},
             0,
+        )
+
+    def handle_fs_age_toggle(self, user, chat_id: int):
+        """Toggle the ±5-year age filter ON/OFF inside the location keyboard."""
+        from .tasks import send_key_message_task
+        pending    = cache.get(f"fs_pending:{chat_id}") or {}
+        current    = pending.get("age_filter", "any")
+        new_filter = "same" if current == "any" else "any"
+        pending["age_filter"] = new_filter
+        cache.set(f"fs_pending:{chat_id}", pending, timeout=600)
+        # Re-send the SAME location step with updated toggle label
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text="📍 کجا دنبال آشنا می‌گردی؟",
+            reply_markup=self.bot.get_fs_location_menu(age_active=(new_filter == "same")),
         )
 
     # ── Simple search ──────────────────────────────────────────────────────────
@@ -1451,6 +1485,10 @@ class BotHandlers:
 
         if UserBlock.objects.filter(blocker=target, blocked=user).exists():
             send_message_task.delay(chat_id=chat_id, text="❌ امکان ارسال پیام به این کاربر وجود ندارد")
+            return
+
+        # Deduct DM cost (1 coin)
+        if not self._check_and_deduct(user, DM_COST, f"پیام مستقیم به {target.first_name or 'کاربر'}"):
             return
 
         cache.set(f"user_state_{chat_id}", f"dm_to_{target.bale_id}", timeout=USER_STATE_TTL)
@@ -1805,8 +1843,155 @@ class BotHandlers:
         self.send_main_menu(chat_id)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Fallback
+    # Featured search — age filter toggle
     # ══════════════════════════════════════════════════════════════════════════
+
+    def handle_fs_toggle_age(self, user, chat_id: int):
+        """Flip the age filter in the current search results and reload page 0."""
+        from .tasks import send_message_task
+        state = cache.get(f"search_state:{chat_id}")
+        if not state:
+            send_message_task.delay(chat_id=chat_id, text="⌛ جستجو منقضی شده. دوباره تلاش کن.")
+            return
+        current = state.get("params", {}).get("age_filter", "any")
+        new_params = {**state.get("params", {}), "age_filter": "same" if current == "any" else "any"}
+        self._show_search_page(user, chat_id, state["type"], new_params, 0)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Coin sell-back
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def handle_sell_coins(self, user, chat_id: int):
+        """Show sell-back options based on user's balance."""
+        from .tasks import send_key_message_task, send_message_task
+
+        balance = user.get_wallet_balance()
+
+        if balance < COIN_BUYBACK_UNIT:
+            send_message_task.delay(
+                chat_id=chat_id,
+                text=(
+                    f"💰 فروش سکه\n"
+                    f"{'─' * 22}\n"
+                    f"نرخ: هر {COIN_BUYBACK_UNIT:,} سکه = {COIN_BUYBACK_TOMANS:,} تومان\n\n"
+                    f"❌ موجودی شما ({balance:,} سکه) کافی نیست.\n"
+                    f"حداقل {COIN_BUYBACK_UNIT:,} سکه برای فروش نیاز دارید."
+                ),
+            )
+            return
+
+        max_units = min(balance // COIN_BUYBACK_UNIT, 4)   # up to 4 options
+        options   = []
+        for units in range(1, max_units + 1):
+            coins  = units * COIN_BUYBACK_UNIT
+            tomans = units * COIN_BUYBACK_TOMANS
+            options.append([{
+                "text":          f"🪙 {coins:,} سکه  ←  💵 {tomans:,} تومان",
+                "callback_data": f"sc_{coins}",
+            }])
+        options.append([{"text": "🔙 بازگشت", "callback_data": "show_wallet"}])
+
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text=(
+                f"💰 فروش سکه\n"
+                f"{'─' * 22}\n"
+                f"نرخ: هر {COIN_BUYBACK_UNIT:,} سکه = {COIN_BUYBACK_TOMANS:,} تومان\n"
+                f"موجودی فعلی: {balance:,} سکه\n\n"
+                "چقدر می‌خوای بفروشی؟"
+            ),
+            reply_markup={"inline_keyboard": options},
+        )
+
+    def handle_sell_coins_amount(self, user, chat_id: int, cb_data: str):
+        """User chose an amount — ask for their bank card number."""
+        from .tasks import send_message_task
+        try:
+            coins = int(cb_data.split("_")[1])
+        except (ValueError, IndexError):
+            send_message_task.delay(chat_id=chat_id, text="❌ خطا در انتخاب مقدار")
+            return
+
+        if coins % COIN_BUYBACK_UNIT != 0 or coins < COIN_BUYBACK_UNIT:
+            send_message_task.delay(chat_id=chat_id, text="❌ مقدار نامعتبر")
+            return
+
+        if user.get_wallet_balance() < coins:
+            send_message_task.delay(chat_id=chat_id, text="❌ موجودی کافی نیست")
+            return
+
+        tomans = (coins // COIN_BUYBACK_UNIT) * COIN_BUYBACK_TOMANS
+        cache.set(
+            f"user_state_{chat_id}",
+            f"awaiting_bank_card_{coins}_{tomans}",
+            timeout=USER_STATE_TTL,
+        )
+        send_message_task.delay(
+            chat_id=chat_id,
+            text=(
+                f"💳 فروش {coins:,} سکه → {tomans:,} تومان\n\n"
+                "شماره کارت ۱۶ رقمی خود را وارد کنید:\n"
+                "(برای انصراف /cancel بزنید)"
+            ),
+        )
+
+    def handle_bank_card_input(self, user, chat_id: int, text: str, state: str):
+        """Validate card number, deduct coins, create withdrawal record, notify admin."""
+        from .tasks import send_message_task
+        from user.models import CoinWithdrawal
+
+        # State: awaiting_bank_card_{coins}_{tomans}
+        try:
+            parts  = state.split("_")
+            coins  = int(parts[3])
+            tomans = int(parts[4])
+        except (ValueError, IndexError):
+            cache.delete(f"user_state_{chat_id}")
+            send_message_task.delay(chat_id=chat_id, text="❌ خطای سیستمی — دوباره تلاش کن")
+            return
+
+        card = text.strip().replace("-", "").replace(" ", "")
+        if not card.isdigit() or len(card) != 16:
+            send_message_task.delay(
+                chat_id=chat_id,
+                text="❌ شماره کارت باید دقیقاً ۱۶ رقم باشد. دوباره وارد کنید:",
+            )
+            return
+
+        if user.get_wallet_balance() < coins:
+            cache.delete(f"user_state_{chat_id}")
+            send_message_task.delay(chat_id=chat_id, text="❌ موجودی ناکافی — درخواست لغو شد")
+            return
+
+        user.deduct_coins(coins, f"فروش سکه — کارت ****{card[-4:]}")
+
+        withdrawal = CoinWithdrawal.objects.create(
+            user=user, coins=coins, tomans=tomans, bank_card=card,
+        )
+
+        cache.delete(f"user_state_{chat_id}")
+        send_message_task.delay(
+            chat_id=chat_id,
+            text=(
+                f"✅ درخواست فروش ثبت شد!\n"
+                f"🪙 {coins:,} سکه از کیف پولت کسر شد\n"
+                f"💵 {tomans:,} تومان به کارت ****{card[-4:]} واریز می‌شه\n"
+                "⏳ معمولاً ظرف ۲۴ ساعت انجام می‌شه 🙏"
+            ),
+        )
+
+        from .services import ADMIN_CHAT_ID
+        if ADMIN_CHAT_ID:
+            send_message_task.delay(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"💰 درخواست فروش سکه #{withdrawal.id}\n"
+                    f"👤 {user.first_name or '---'}  |  ID: {chat_id}\n"
+                    f"🔖 @{user.referral_code or '---'}\n"
+                    f"🪙 {coins:,} سکه  →  💵 {tomans:,} تومان\n"
+                    f"💳 شماره کارت: {card}"
+                ),
+            )
 
     def handle_fallback(self, chat_id: int, user, received_text):
         from .tasks import send_message_task

@@ -315,3 +315,39 @@ class UserBlock(models.Model):
 
     def __str__(self):
         return f"{self.blocker} 🚫 {self.blocked}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Coin sell-back / withdrawal
+# ─────────────────────────────────────────────────────────────────────────────
+
+WITHDRAWAL_STATUS = (
+    (0, "در انتظار"),
+    (1, "پرداخت شده"),
+    (2, "رد شده"),
+)
+
+
+class CoinWithdrawal(BaseModel):
+    """
+    A user requests to sell coins back for tomans.
+    Admin processes the bank transfer and marks it paid/rejected.
+    """
+    user        = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='withdrawals'
+    )
+    coins       = models.PositiveIntegerField()
+    tomans      = models.PositiveIntegerField()
+    bank_card   = models.CharField(max_length=16)
+    status      = models.PositiveSmallIntegerField(choices=WITHDRAWAL_STATUS, default=0)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'CoinWithdrawals'
+        indexes  = [models.Index(fields=['status'])]
+
+    def __str__(self):
+        return (
+            f"{self.user} — {self.coins:,} سکه → {self.tomans:,} تومان"
+            f" ({self.get_status_display()})"
+        )
