@@ -503,10 +503,10 @@ class BotHandlers:
             f"• معرفی موفق دوست: {REFERRAL_REWARD_TOMANS:,} تومان 💵\n\n"
             "─────────────────────\n"
             "🔖 لینک معرفی شما:\n"
-            f"https://ble.ir/alochatbot?start={code}\n\n"
+            f"`https://ble.ir/alochatbot?start={code}`\n\n"
             "❓ سؤال یا مشکل داری؟ با ادمین تماس بگیر."
         )
-        send_message_task.delay(chat_id=chat_id, text=text)
+        send_message_task.delay(chat_id=chat_id, text=text, parse_mode="Markdown")
 
     # ══════════════════════════════════════════════════════════════════════════
     # Onboarding
@@ -736,13 +736,18 @@ class BotHandlers:
             f"{'─' * 22}\n"
             f"📣 هر بار که دوستت از طریق لینک زیر وارد بشه\n"
             f"و پروفایلشو کامل کنه، {REFERRAL_REWARD_TOMANS:,} تومان به حسابت واریز می‌شه!\n\n"
-            f"🔗 لینک معرفی شما:\n"
-            f"https://ble.ir/alochatbot?start={code}"
+            f"🔗 لینک معرفی شما (برای کپی ضربه بزن):\n"
+            f"`https://ble.ir/alochatbot?start={code}`"
         )
         send_key_message_task.delay(
             chat_id=chat_id,
             text=text,
-            reply_markup=self.bot.get_referral_menu(code),
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "📤 اشتراک‌گذاری لینک", "url": f"https://ble.ir/alochatbot?start={code}"}],
+                ]
+            },
+            parse_mode="Markdown",
         )
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -776,26 +781,40 @@ class BotHandlers:
 
     def handle_share_link(self, user, chat_id: int):
         """
-        Sends the user their two shareable deep links:
-          - Profile view link  → anyone can see profile + like/follow/request chat
-          - Direct chat link   → anyone can instantly send a chat request
-        Both can be pasted in groups, channels or personal bios.
+        Sends profile share links.
+        <code> blocks → tap once to copy (Bale/Telegram built-in copy button)
+        url buttons   → tap to open directly
         """
-        from .tasks import send_message_task
+        from .tasks import send_key_message_task
+        import html as _h
         bid  = user.bale_id
-        name = user.first_name or "کاربر"
+        name = _h.escape(user.first_name or "کاربر")
         vp   = f"{BOT_DEEP_LINK}?start=vp_{bid}"
         cr   = f"{BOT_DEEP_LINK}?start=cr_{bid}"
+
         text = (
-            f"🔗 لینک‌های اشتراک‌گذاری «{name}»\n"
-            f"{'─' * 24}\n\n"
-            f"👁 *مشاهده پروفایل:*\n{vp}\n\n"
-            f"💬 *درخواست چت مستقیم:*\n{cr}\n\n"
-            f"{'─' * 24}\n"
-            "📌 این لینک‌ها رو توی گروه‌ها، کانال‌ها یا بیوگرافیت به اشتراک بذار.\n"
-            "هر کسی که کلیک کنه مستقیم پروفایلت رو می‌بینه یا می‌تونه باهات چت شروع کنه 😊"
+            f"🔗 لینک‌های اشتراک‌گذاری <b>{name}</b>\n"
+            "─────────────────────────\n\n"
+            "👁 <b>مشاهده پروفایل</b>\n"
+            "برای کپی روی لینک زیر ضربه بزن 👇\n"
+            f"<code>{vp}</code>\n\n"
+            "💬 <b>درخواست چت مستقیم</b>\n"
+            "برای کپی روی لینک زیر ضربه بزن 👇\n"
+            f"<code>{cr}</code>\n\n"
+            "📌 این لینک‌ها رو توی گروه‌ها، کانال‌ها یا بیوت به اشتراک بذار.\n"
+            "هر کسی کلیک کنه پروفایلت رو می‌بینه یا باهات چت شروع می‌کنه 😊"
         )
-        send_message_task.delay(chat_id=chat_id, text=text)
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text=text,
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "👁 باز کردن پروفایل",   "url": vp}],
+                    [{"text": "💬 ارسال درخواست چت",   "url": cr}],
+                ]
+            },
+            parse_mode="HTML",
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Photo message router
