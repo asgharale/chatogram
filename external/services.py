@@ -526,6 +526,9 @@ class BaleBotService:
                 {"text": "🎭 درخواست چت",   "callback_data": f"chat_req_{target_bale_id}"},
             ])
             rows.append([
+                {"text": "📋 کپی لینک چت", "callback_data": f"copy_link_{target_bale_id}"},
+            ])
+            rows.append([
                 {
                     "text": "💔 لغو لایک" if is_liked else "❤️ لایک",
                     "callback_data": f"like_user_{target_bale_id}",

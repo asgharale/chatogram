@@ -197,6 +197,8 @@ class BotHandlers:
                 self.handle_block_user(user, chat_id, cb_data)
             elif cb_data.startswith("dm_user_"):
                 self.handle_dm_user(user, chat_id, cb_data)
+            elif cb_data.startswith("copy_link_"):
+                self.handle_copy_link(user, chat_id, cb_data)
             elif cb_data.startswith("dm_reply_"):
                 self.handle_dm_reply(user, chat_id, cb_data)
 
@@ -782,25 +784,24 @@ class BotHandlers:
     def handle_share_link(self, user, chat_id: int):
         """
         Sends profile share links.
-        <code> blocks → tap once to copy (Bale/Telegram built-in copy button)
-        url buttons   → tap to open directly
+        Backtick code blocks → tap to copy (Bale/Telegram built-in copy button).
+        URL buttons          → tap to open directly.
         """
         from .tasks import send_key_message_task
-        import html as _h
         bid  = user.bale_id
-        name = _h.escape(user.first_name or "کاربر")
+        name = self._md_escape(user.first_name or "کاربر")
         vp   = f"{BOT_DEEP_LINK}?start=vp_{bid}"
         cr   = f"{BOT_DEEP_LINK}?start=cr_{bid}"
 
         text = (
-            f"🔗 لینک‌های اشتراک‌گذاری <b>{name}</b>\n"
+            f"🔗 لینک‌های اشتراک‌گذاری *{name}*\n"
             "─────────────────────────\n\n"
-            "👁 <b>مشاهده پروفایل</b>\n"
+            "👁 *مشاهده پروفایل*\n"
             "برای کپی روی لینک زیر ضربه بزن 👇\n"
-            f"<code>{vp}</code>\n\n"
-            "💬 <b>درخواست چت مستقیم</b>\n"
+            f"`{vp}`\n\n"
+            "💬 *درخواست چت مستقیم*\n"
             "برای کپی روی لینک زیر ضربه بزن 👇\n"
-            f"<code>{cr}</code>\n\n"
+            f"`{cr}`\n\n"
             "📌 این لینک‌ها رو توی گروه‌ها، کانال‌ها یا بیوت به اشتراک بذار.\n"
             "هر کسی کلیک کنه پروفایلت رو می‌بینه یا باهات چت شروع می‌کنه 😊"
         )
@@ -809,11 +810,11 @@ class BotHandlers:
             text=text,
             reply_markup={
                 "inline_keyboard": [
-                    [{"text": "👁 باز کردن پروفایل",   "url": vp}],
-                    [{"text": "💬 ارسال درخواست چت",   "url": cr}],
+                    [{"text": "👁 باز کردن پروفایل",  "url": vp}],
+                    [{"text": "💬 ارسال درخواست چت",  "url": cr}],
                 ]
             },
-            parse_mode="HTML",
+            parse_mode="Markdown",
         )
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1578,6 +1579,45 @@ class BotHandlers:
             ),
         )
 
+    def handle_copy_link(self, user, chat_id: int, cb_data: str):
+        """
+        Sends the chat-request deep link for another user in copyable backtick blocks.
+        Tapping a backtick block in Bale/Telegram copies the URL to clipboard.
+        """
+        from .tasks import send_key_message_task
+        target = self._get_user_from_cb(cb_data, split_parts=2)
+        if not target:
+            from .tasks import send_message_task
+            send_message_task.delay(chat_id=chat_id, text="کاربر پیدا نشد ❌")
+            return
+
+        name   = self._md_escape(target.first_name or f"@{target.referral_code or target.bale_id}")
+        cr_url = f"{BOT_DEEP_LINK}?start=cr_{target.bale_id}"
+        vp_url = f"{BOT_DEEP_LINK}?start=vp_{target.bale_id}"
+
+        text = (
+            f"🔗 لینک چت با *{name}*\n"
+            "─────────────────────────\n\n"
+            "💬 *درخواست چت مستقیم*\n"
+            "روی لینک زیر ضربه بزن تا کپی بشه 👇\n"
+            f"`{cr_url}`\n\n"
+            "👁 *مشاهده پروفایل*\n"
+            "روی لینک زیر ضربه بزن تا کپی بشه 👇\n"
+            f"`{vp_url}`"
+        )
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text=text,
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "💬 شروع چت مستقیم",   "url": cr_url}],
+                    [{"text": "👁 مشاهده پروفایل",    "url": vp_url}],
+                    [{"text": "🔙 بازگشت به پروفایل", "callback_data": f"view_user_{target.bale_id}"}],
+                ]
+            },
+            parse_mode="Markdown",
+        )
+
     # ══════════════════════════════════════════════════════════════════════════
     # Direct chat request
     # ══════════════════════════════════════════════════════════════════════════
@@ -1660,37 +1700,7 @@ class BotHandlers:
                 )
                 return
 
-        if not user.deduct_coins(CHAT_START_COST, "شروع چت"):
-            send_key_message_task.delay(
-                chat_id=chat_id,
-                text=(
-                    f"❌ موجودی کافی نیست!\n"
-                    f"برای شروع چت {CHAT_START_COST} سکه نیاز دارید."
-                ),
-                reply_markup={"inline_keyboard": [[
-                    {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
-                ]]},
-            )
-            return
-
-        if not requester.deduct_coins(CHAT_START_COST, "شروع چت"):
-            user.add_coins(CHAT_START_COST, "بازگشت سکه — طرف مقابل موجودی کافی ندارد")
-            send_key_message_task.delay(
-                chat_id=requester.bale_id,
-                text=(
-                    f"❌ موجودی کافی نیست!\n"
-                    f"برای شروع چت {CHAT_START_COST} سکه نیاز دارید."
-                ),
-                reply_markup={"inline_keyboard": [[
-                    {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
-                ]]},
-            )
-            send_message_task.delay(
-                chat_id=chat_id,
-                text="❌ چت شروع نشد — طرف مقابل موجودی کافی ندارد.",
-            )
-            return
-
+        # Accepting is FREE — only the sender already paid CHAT_REQUEST_COST.
         session.status = 1
         session.save()
         self._invalidate_session_cache(chat_id, requester.bale_id)
