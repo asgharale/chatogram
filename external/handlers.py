@@ -199,6 +199,8 @@ class BotHandlers:
                 self.handle_dm_user(user, chat_id, cb_data)
             elif cb_data.startswith("copy_link_"):
                 self.handle_copy_link(user, chat_id, cb_data)
+            elif cb_data.startswith("rawlink_"):
+                self.handle_rawlink(user, chat_id, cb_data)
             elif cb_data.startswith("dm_reply_"):
                 self.handle_dm_reply(user, chat_id, cb_data)
 
@@ -783,38 +785,34 @@ class BotHandlers:
 
     def handle_share_link(self, user, chat_id: int):
         """
-        Sends profile share links.
-        Backtick code blocks → tap to copy (Bale/Telegram built-in copy button).
-        URL buttons          → tap to open directly.
+        Sends profile share links as plain text (no parse_mode).
+        Plain URLs are auto-linked and long-pressable to copy in every Bale/Telegram client.
+        Dedicated 'just the URL' buttons let the user tap once to get a single-line URL message.
         """
         from .tasks import send_key_message_task
         bid  = user.bale_id
-        name = self._md_escape(user.first_name or "کاربر")
+        name = user.first_name or "کاربر"
         vp   = f"{BOT_DEEP_LINK}?start=vp_{bid}"
         cr   = f"{BOT_DEEP_LINK}?start=cr_{bid}"
 
         text = (
-            f"🔗 لینک‌های اشتراک‌گذاری *{name}*\n"
+            f"🔗 لینک‌های اشتراک‌گذاری {name}\n"
             "─────────────────────────\n\n"
-            "👁 *مشاهده پروفایل*\n"
-            "برای کپی روی لینک زیر ضربه بزن 👇\n"
-            f"`{vp}`\n\n"
-            "💬 *درخواست چت مستقیم*\n"
-            "برای کپی روی لینک زیر ضربه بزن 👇\n"
-            f"`{cr}`\n\n"
-            "📌 این لینک‌ها رو توی گروه‌ها، کانال‌ها یا بیوت به اشتراک بذار.\n"
-            "هر کسی کلیک کنه پروفایلت رو می‌بینه یا باهات چت شروع می‌کنه 😊"
+            f"👁 مشاهده پروفایل:\n{vp}\n\n"
+            f"💬 درخواست چت مستقیم:\n{cr}\n\n"
+            "📌 برای کپی روی لینک نگه‌دار یا از دکمه‌های زیر استفاده کن."
         )
         send_key_message_task.delay(
             chat_id=chat_id,
             text=text,
             reply_markup={
                 "inline_keyboard": [
-                    [{"text": "👁 باز کردن پروفایل",  "url": vp}],
-                    [{"text": "💬 ارسال درخواست چت",  "url": cr}],
+                    [{"text": "👁 باز کردن پروفایل",       "url": vp}],
+                    [{"text": "💬 باز کردن چت مستقیم",     "url": cr}],
+                    [{"text": "📋 فقط لینک پروفایل",       "callback_data": f"rawlink_vp_{bid}"}],
+                    [{"text": "📋 فقط لینک چت مستقیم",     "callback_data": f"rawlink_cr_{bid}"}],
                 ]
             },
-            parse_mode="Markdown",
         )
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1580,10 +1578,7 @@ class BotHandlers:
         )
 
     def handle_copy_link(self, user, chat_id: int, cb_data: str):
-        """
-        Sends the chat-request deep link for another user in copyable backtick blocks.
-        Tapping a backtick block in Bale/Telegram copies the URL to clipboard.
-        """
+        """Plain text link display — no parse_mode, no formatting breakage."""
         from .tasks import send_key_message_task
         target = self._get_user_from_cb(cb_data, split_parts=2)
         if not target:
@@ -1591,32 +1586,55 @@ class BotHandlers:
             send_message_task.delay(chat_id=chat_id, text="کاربر پیدا نشد ❌")
             return
 
-        name   = self._md_escape(target.first_name or f"@{target.referral_code or target.bale_id}")
+        name   = target.first_name or f"@{target.referral_code or target.bale_id}"
         cr_url = f"{BOT_DEEP_LINK}?start=cr_{target.bale_id}"
         vp_url = f"{BOT_DEEP_LINK}?start=vp_{target.bale_id}"
 
         text = (
-            f"🔗 لینک چت با *{name}*\n"
+            f"🔗 لینک‌های {name}\n"
             "─────────────────────────\n\n"
-            "💬 *درخواست چت مستقیم*\n"
-            "روی لینک زیر ضربه بزن تا کپی بشه 👇\n"
-            f"`{cr_url}`\n\n"
-            "👁 *مشاهده پروفایل*\n"
-            "روی لینک زیر ضربه بزن تا کپی بشه 👇\n"
-            f"`{vp_url}`"
+            f"💬 درخواست چت مستقیم:\n{cr_url}\n\n"
+            f"👁 مشاهده پروفایل:\n{vp_url}\n\n"
+            "📌 برای کپی روی لینک نگه‌دار."
         )
         send_key_message_task.delay(
             chat_id=chat_id,
             text=text,
             reply_markup={
                 "inline_keyboard": [
-                    [{"text": "💬 شروع چت مستقیم",   "url": cr_url}],
-                    [{"text": "👁 مشاهده پروفایل",    "url": vp_url}],
-                    [{"text": "🔙 بازگشت به پروفایل", "callback_data": f"view_user_{target.bale_id}"}],
+                    [{"text": "💬 شروع چت مستقیم",       "url": cr_url}],
+                    [{"text": "👁 مشاهده پروفایل",        "url": vp_url}],
+                    [{"text": "📋 فقط لینک چت",           "callback_data": f"rawlink_cr_{target.bale_id}"}],
+                    [{"text": "📋 فقط لینک پروفایل",      "callback_data": f"rawlink_vp_{target.bale_id}"}],
+                    [{"text": "🔙 بازگشت به پروفایل",     "callback_data": f"view_user_{target.bale_id}"}],
                 ]
             },
-            parse_mode="Markdown",
         )
+
+    def handle_rawlink(self, user, chat_id: int, cb_data: str):
+        """
+        Sends a single bare URL as its own message.
+        In Bale/Telegram, a plain URL is auto-linked (blue/tappable) AND
+        long-pressing it gives the native OS 'Copy' option.
+        Format: rawlink_vp_{bale_id} or rawlink_cr_{bale_id}
+        """
+        from .tasks import send_message_task
+        try:
+            # cb_data looks like: rawlink_vp_123456789 or rawlink_cr_123456789
+            parts      = cb_data.split("_", 2)   # ['rawlink', 'vp'|'cr', 'bale_id']
+            link_type  = parts[1]                  # 'vp' or 'cr'
+            bale_id    = int(parts[2])
+        except (IndexError, ValueError):
+            send_message_task.delay(chat_id=chat_id, text="❌ خطا")
+            return
+
+        prefix = "vp" if link_type == "vp" else "cr"
+        url    = f"{BOT_DEEP_LINK}?start={prefix}_{bale_id}"
+
+        # Send just the bare URL — nothing else.
+        # The Bale client renders it as a tappable link;
+        # long-press → Copy from the OS context menu.
+        send_message_task.delay(chat_id=chat_id, text=url)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Direct chat request
