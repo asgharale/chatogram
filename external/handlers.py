@@ -13,6 +13,7 @@ from .services import (
     BaleBotService,
     CHAT_REQUEST_COST,
     CHAT_START_COST,
+    ANON_CHAT_COST,
     DM_COST,
     GENDER_FILTER_COST,
     COIN_BUYBACK_UNIT,
@@ -1815,21 +1816,21 @@ class BotHandlers:
             else:
                 if not is_free:
                     for u in (user, user2):
-                        if u.get_wallet_balance() < CHAT_START_COST:
+                        if u.get_wallet_balance() < ANON_CHAT_COST:
                             self.bot.enqueue_user_for_pref(waiting_id, pref)
                             send_key_message_task.delay(
                                 chat_id=u.bale_id,
                                 text=(
                                     f"❌ موجودی کافی نیست!\n"
-                                    f"برای چت ناشناس {CHAT_START_COST} سکه لازم دارید."
+                                    f"برای چت ناشناس {ANON_CHAT_COST} سکه لازم دارید."
                                 ),
                                 reply_markup={"inline_keyboard": [[
                                     {"text": "💳 شارژ کیف پول", "callback_data": "wallet_topup"}
                                 ]]},
                             )
                             return
-                    user.deduct_coins(CHAT_START_COST, "چت ناشناس")
-                    user2.deduct_coins(CHAT_START_COST, "چت ناشناس")
+                    user.deduct_coins(ANON_CHAT_COST, "چت ناشناس")
+                    user2.deduct_coins(ANON_CHAT_COST, "چت ناشناس")
 
                 session  = ChatSession.objects.create(user1=user2, user2=user, status=1)
                 self._invalidate_session_cache(chat_id, waiting_id)
@@ -1849,12 +1850,12 @@ class BotHandlers:
             send_message_task.delay(chat_id=chat_id, text="هنوز در صف هستی، صبر کن 🔍")
             return
 
-        if not is_free and user.get_wallet_balance() < CHAT_START_COST:
+        if not is_free and user.get_wallet_balance() < ANON_CHAT_COST:
             send_key_message_task.delay(
                 chat_id=chat_id,
                 text=(
                     f"❌ موجودی کافی نیست!\n"
-                    f"برای چت ناشناس {CHAT_START_COST} سکه لازم دارید.\n"
+                    f"برای چت ناشناس {ANON_CHAT_COST} سکه لازم دارید.\n"
                     f"موجودی فعلی: {user.get_wallet_balance()} سکه"
                 ),
                 reply_markup={"inline_keyboard": [[
@@ -1867,7 +1868,7 @@ class BotHandlers:
         anon_chat_timeout_task.apply_async(args=[chat_id, pref], countdown=ANON_CHAT_COUNTDOWN)
 
         pref_label = {"boys": "👦 پسرها", "girls": "👧 دخترها"}.get(pref, "🎭 همه")
-        cost_note  = "🆓 این چت رایگانه!" if is_free else f"در صورت اتصال {CHAT_START_COST} سکه کسر می‌شه."
+        cost_note  = "🆓 این چت رایگانه!" if is_free else f"در صورت اتصال {ANON_CHAT_COST} سکه کسر می‌شه."
         send_key_message_task.delay(
             chat_id=chat_id,
             text=(

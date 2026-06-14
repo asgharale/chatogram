@@ -28,6 +28,7 @@ CHAT_REQUEST_COST    = 1     # sending a chat request (via profile / deep link)
 DM_COST              = 1     # sending a direct message via profile
 GENDER_FILTER_COST   = 2     # activating boys/girls filter in featured search (not "any")
 CHAT_START_COST      = 8     # per-side cost when an anon chat session starts
+ANON_CHAT_COST       = 2     # cost for requester in anonymous chat (boys/girls pref only)
 WELCOME_COINS        = 15    # gift coins on first /start
 REFERRAL_REWARD_TOMANS = 5_000  # Iranian Tomans per successful referral
 
