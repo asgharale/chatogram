@@ -29,12 +29,19 @@ ALLOWED_HOSTS = [
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+
+    "unfold",
+    "unfold.contrib.filters",
+    "unfold.contrib.forms",
+    "unfold.contrib.inlines",
+ 
+    "django.contrib.admin",
+
 
     'rest_framework',
     'corsheaders',
@@ -209,3 +216,222 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'http')
+
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# UNFOLD CONFIG
+# ──────────────────────────────────────────────────────────────────────────
+ 
+def badge_pending_deposits(request):
+    """Sidebar badge showing count of deposits awaiting review."""
+    from user.models import PendingDeposit
+    return PendingDeposit.objects.filter(status=0).count()
+ 
+ 
+def badge_pending_withdrawals(request):
+    """Sidebar badge showing count of withdrawal requests awaiting review."""
+    from user.models import CoinWithdrawal
+    return CoinWithdrawal.objects.filter(status=0).count()
+ 
+ 
+def dashboard_callback(request, context):
+    """
+    Injects extra data into the built-in admin index (dashboard).
+    Pulled in via templates/admin/index.html override (see step 5 below).
+    """
+    from user.models import UserProfile, PendingDeposit, CoinWithdrawal, Wallet
+    from django.db.models import Sum
+ 
+    context.update({
+        "kpi": [
+            {
+                "title": _("Total users"),
+                "metric": UserProfile.objects.count(),
+                "icon": "group",
+            },
+            {
+                "title": _("Pending deposits"),
+                "metric": PendingDeposit.objects.filter(status=0).count(),
+                "icon": "hourglass_empty",
+            },
+            {
+                "title": _("Pending withdrawals"),
+                "metric": CoinWithdrawal.objects.filter(status=0).count(),
+                "icon": "payments",
+            },
+            {
+                "title": _("Coins in circulation"),
+                "metric": Wallet.objects.aggregate(s=Sum("balance"))["s"] or 0,
+                "icon": "monetization_on",
+            },
+        ],
+    })
+    return context
+ 
+ 
+def environment_callback(request):
+    """Top-right badge — flip via env var for staging/prod visibility."""
+    import os
+    env = os.getenv("DJANGO_ENV", "development")
+    mapping = {
+        "production": ["Production", "danger"],
+        "staging": ["Staging", "warning"],
+        "development": ["Development", "info"],
+    }
+    return mapping.get(env, ["Development", "info"])
+ 
+ 
+UNFOLD = {
+    "SITE_TITLE": "پنل مدیریت",
+    "SITE_HEADER": "پنل مدیریت",
+    "SITE_SUBHEADER": "مدیریت کاربران، کیف پول و چت",
+    "SITE_URL": "/",
+    # "SITE_ICON": lambda request: static("logo.svg"),  # uncomment once you add a logo
+    # "SITE_LOGO": lambda request: static("logo.svg"),
+ 
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
+    "SHOW_BACK_BUTTON": True,
+ 
+    "ENVIRONMENT": "config.settings.environment_callback",
+    "DASHBOARD_CALLBACK": "config.settings.dashboard_callback",
+ 
+    "BORDER_RADIUS": "8px",
+ 
+    "COLORS": {
+        "primary": {
+            "50": "#eff6ff",
+            "100": "#dbeafe",
+            "200": "#bfdbfe",
+            "300": "#93c5fd",
+            "400": "#60a5fa",
+            "500": "#3b82f6",
+            "600": "#2563eb",
+            "700": "#1d4ed8",
+            "800": "#1e40af",
+            "900": "#1e3a8a",
+            "950": "#172554",
+        },
+    },
+ 
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": _("داشبورد"),
+                "separator": False,
+                "items": [
+                    {
+                        "title": _("خانه"),
+                        "icon": "dashboard",
+                        "link": reverse_lazy("admin:index"),
+                    },
+                ],
+            },
+            {
+                "title": _("کاربران و پروفایل"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("کاربران"),
+                        "icon": "person",
+                        "link": reverse_lazy("admin:user_userprofile_changelist"),
+                    },
+                    {
+                        "title": _("استان‌ها"),
+                        "icon": "map",
+                        "link": reverse_lazy("admin:config_province_changelist"),
+                    },
+                    {
+                        "title": _("شهرها"),
+                        "icon": "location_city",
+                        "link": reverse_lazy("admin:config_city_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": _("کیف پول و مالی"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("کیف پول‌ها"),
+                        "icon": "account_balance_wallet",
+                        "link": reverse_lazy("admin:user_wallet_changelist"),
+                    },
+                    {
+                        "title": _("تراکنش‌های سکه"),
+                        "icon": "swap_horiz",
+                        "link": reverse_lazy("admin:user_wallettransaction_changelist"),
+                    },
+                    {
+                        "title": _("تراکنش‌های تومان"),
+                        "icon": "savings",
+                        "link": reverse_lazy("admin:user_tomantransaction_changelist"),
+                    },
+                    {
+                        "title": _("واریزی‌های در انتظار"),
+                        "icon": "hourglass_empty",
+                        "link": reverse_lazy("admin:user_pendingdeposit_changelist"),
+                        "badge": "config.settings.badge_pending_deposits",
+                    },
+                    {
+                        "title": _("درخواست‌های برداشت"),
+                        "icon": "payments",
+                        "link": reverse_lazy("admin:user_coinwithdrawal_changelist"),
+                        "badge": "config.settings.badge_pending_withdrawals",
+                    },
+                ],
+            },
+            {
+                "title": _("تعاملات اجتماعی"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("لایک‌ها"),
+                        "icon": "favorite",
+                        "link": reverse_lazy("admin:user_profilelike_changelist"),
+                    },
+                    {
+                        "title": _("دنبال‌کننده‌ها"),
+                        "icon": "group",
+                        "link": reverse_lazy("admin:user_profilefollow_changelist"),
+                    },
+                    {
+                        "title": _("بلاک‌ها"),
+                        "icon": "block",
+                        "link": reverse_lazy("admin:user_userblock_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": _("چت"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("جلسات چت"),
+                        "icon": "forum",
+                        "link": reverse_lazy("admin:chat_chatsession_changelist"),
+                    },
+                    {
+                        "title": _("پیام‌ها"),
+                        "icon": "chat",
+                        "link": reverse_lazy("admin:chat_message_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": _("پشتیبانی"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("کانال‌های پشتیبانی"),
+                        "icon": "support_agent",
+                        "link": reverse_lazy("admin:support_supportchannel_changelist"),
+                    },
+                ],
+            },
+        ],
+    },
+}
