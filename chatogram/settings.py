@@ -431,8 +431,7 @@ UNFOLD = {
                     {
                         "title": _("کانال‌های پشتیبانی"),
                         "icon": "support_agent",
-                        "link": reverse_lazy("admin:support_supportchannel_changelist"),
-                    },
+                        "link": reverse_lazy("admin:external_supportchannel_changelist"),                    },
                 ],
             },
         ],
