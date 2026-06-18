@@ -1,6 +1,9 @@
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+from django.urls import reverse_lazy
+from django.utils.translation import gettext_lazy as _
+
 
 # ENV
 load_dotenv()
@@ -294,8 +297,8 @@ UNFOLD = {
     "SHOW_VIEW_ON_SITE": False,
     "SHOW_BACK_BUTTON": True,
  
-    "ENVIRONMENT": "config.settings.environment_callback",
-    "DASHBOARD_CALLBACK": "config.settings.dashboard_callback",
+    "ENVIRONMENT": "chatogram.settings.environment_callback",
+    "DASHBOARD_CALLBACK": "chatogram.settings.dashboard_callback",
  
     "BORDER_RADIUS": "8px",
  
