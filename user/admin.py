@@ -84,10 +84,11 @@ class WalletTransactionAdmin(ModelAdmin):
     search_fields = ("wallet__user__username", "wallet__user__bale_id", "description")
     autocomplete_fields = ("wallet",)
 
-    @display(description=_("مقدار"), label={0: "success", 1: "danger"}, label_field="type")
+    @display(description=_("مقدار"), label=True)
     def show_signed_amount(self, obj):
         sign = "+" if obj.type == 0 else "-"
-        return f"{sign}{obj.amount:,}"
+        color = "success" if obj.type == 0 else "danger"
+        return f"{sign}{obj.amount:,}", color
 
 
 @admin.register(TomanTransaction)
@@ -116,17 +117,10 @@ class PendingDepositAdmin(ModelAdmin):
     actions = ["approve_deposits", "reject_deposits"]
     list_filter_submit = True
 
-    @display(
-        description=_("وضعیت"),
-        label={
-            0: "warning",   # در انتظار
-            1: "success",   # تایید شده
-            2: "danger",    # رد شده
-        },
-        label_field="status",
-    )
+    @display(description=_("وضعیت"), label=True)
     def show_status(self, obj):
-        return obj.get_status_display()
+        colors = {0: "warning", 1: "success", 2: "danger"}
+        return obj.get_status_display(), colors.get(obj.status, "info")
 
     @admin.action(description=_("تایید واریزی‌های انتخاب‌شده"))
     def approve_deposits(self, request, queryset):
@@ -155,13 +149,10 @@ class CoinWithdrawalAdmin(ModelAdmin):
     autocomplete_fields = ("user",)
     list_filter_submit = True
 
-    @display(
-        description=_("وضعیت"),
-        label={0: "warning", 1: "success", 2: "danger"},
-        label_field="status",
-    )
+    @display(description=_("وضعیت"), label=True)
     def show_status(self, obj):
-        return obj.get_status_display()
+        colors = {0: "warning", 1: "success", 2: "danger"}
+        return obj.get_status_display(), colors.get(obj.status, "info")
 
 
 @admin.register(ProfileLike)

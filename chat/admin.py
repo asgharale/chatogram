@@ -25,13 +25,11 @@ class ChatSessionAdmin(ModelAdmin):
     inlines = [MessageInline]
     list_filter_submit = True
 
-    @display(
-        description=_("وضعیت"),
-        label={0: "info", 1: "success", 2: "danger"},  # adjust mapping to match your CHAT_STATUS choices
-        label_field="status",
-    )
+    @display(description=_("وضعیت"), label=True)
     def show_status(self, obj):
-        return obj.get_status_display()
+        # Return (display_text, color) — adjust int keys to match your CHAT_STATUS enum
+        colors = {0: "info", 1: "success", 2: "danger"}
+        return obj.get_status_display(), colors.get(obj.status, "info")
 
 
 @admin.register(Message)
