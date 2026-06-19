@@ -69,8 +69,13 @@ class BotHandlers:
     # Main router
     # ══════════════════════════════════════════════════════════════════════════
 
-    def dispatch(self, user, chat_id: int, text, contact, photo, cb_data):
+    def dispatch(self, user, chat_id: int, text, contact, photo, cb_data, message_id=None):
         from user.enums import GENDER_MAP
+
+        # The message_id of the tapped button's message (callback path only).
+        # Used by _edit_or_send_* helpers to update the SAME message instead
+        # of sending a new one. None for plain text/photo messages.
+        self.message_id = message_id
 
         # ── Message path ──────────────────────────────────────────────────────
         if text is not None and cb_data is None:
@@ -142,7 +147,10 @@ class BotHandlers:
                 "man_gender", "woman_gender", "unknown_gender",
                 "province_", "city_", "age_", "joined_supported",
             )
-            ADMIN_PREFIXES = ("deposit_approve_", "deposit_reject_")
+            ADMIN_PREFIXES = (
+                "deposit_approve_", "deposit_reject_",
+                "admin_ban_", "admin_block_", "admin_unban_",
+            )
 
             is_onboarding   = any(
                 cb_data == p or cb_data.startswith(p) for p in ONBOARDING_PREFIXES
@@ -272,6 +280,14 @@ class BotHandlers:
             elif cb_data.startswith("deposit_reject_"):
                 self.handle_deposit_reject(user, chat_id, cb_data)
 
+            # ── Admin: ban / block (from report action buttons) ────────────────
+            elif cb_data.startswith("admin_ban_"):
+                self.handle_admin_ban(user, chat_id, cb_data)
+            elif cb_data.startswith("admin_block_"):
+                self.handle_admin_block(user, chat_id, cb_data)
+            elif cb_data.startswith("admin_unban_"):
+                self.handle_admin_unban(user, chat_id, cb_data)
+
             else:
                 self.send_main_menu(chat_id)
 
@@ -284,6 +300,46 @@ class BotHandlers:
     # ══════════════════════════════════════════════════════════════════════════
     # Internal helpers
     # ══════════════════════════════════════════════════════════════════════════
+
+    def _edit_or_send_key(self, chat_id: int, text: str, reply_markup: dict = None, parse_mode: str = None):
+        """
+        Updates the message the user just tapped a button on, instead of
+        sending a new one — used for menu navigation / pagination so the
+        chat doesn't fill up with duplicate menus.
+        Falls back to sending a fresh message when there's no editable
+        message in context (e.g. triggered from a reply-keyboard button
+        or a deep link, not an inline-button tap).
+        """
+        from .tasks import edit_message_task, send_key_message_task
+        if getattr(self, "message_id", None):
+            edit_message_task.delay(
+                chat_id=chat_id, message_id=self.message_id,
+                text=text, reply_markup=reply_markup, parse_mode=parse_mode,
+            )
+        else:
+            send_key_message_task.delay(
+                chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode,
+            )
+
+    def _edit_or_send_caption(self, chat_id: int, caption: str, reply_markup: dict = None, file_id: str = None):
+        """
+        Same idea as _edit_or_send_key but for photo-caption messages.
+        If there's no editable message in context, falls back to sending a
+        fresh photo (requires file_id) or, if no file_id is available,
+        sends the caption as a plain text message.
+        """
+        from .tasks import edit_caption_task, send_photo_caption_task, send_key_message_task
+        if getattr(self, "message_id", None):
+            edit_caption_task.delay(
+                chat_id=chat_id, message_id=self.message_id,
+                caption=caption, reply_markup=reply_markup,
+            )
+        elif file_id:
+            send_photo_caption_task.delay(
+                chat_id=chat_id, file_id=file_id, caption=caption, reply_markup=reply_markup,
+            )
+        else:
+            send_key_message_task.delay(chat_id=chat_id, text=caption, reply_markup=reply_markup)
 
     def _send_support_gate(self, chat_id: int):
         from .tasks import send_key_message_task
@@ -643,18 +699,17 @@ class BotHandlers:
         send_message_task.delay(chat_id=chat_id, text="شماره تلفنت ذخیره شد ✅")
 
     def handle_gender_callback(self, user, chat_id: int, cb_data: str):
-        from .tasks import send_key_message_task
         from user.enums import GENDER_MAP
         user.gender = GENDER_MAP[cb_data]
         user.save(update_fields=["gender"])
-        send_key_message_task.delay(
+        self._edit_or_send_key(
             chat_id=chat_id,
             text="عالی! حالا استانت 🗺 رو انتخاب کن:",
             reply_markup=self.bot.get_province_menu(),
         )
 
     def handle_province_callback(self, user, chat_id: int, cb_data: str):
-        from .tasks import send_message_task, send_key_message_task
+        from .tasks import send_message_task
         from config.models import Province
         try:
             province_id = int(cb_data.split("_")[1])
@@ -664,14 +719,14 @@ class BotHandlers:
             return
         user.province = province
         user.save(update_fields=["province"])
-        send_key_message_task.delay(
+        self._edit_or_send_key(
             chat_id=chat_id,
             text="حالا شهرت 🏡 رو انتخاب کن:",
             reply_markup=self.bot.get_city_menu(province_id=province_id),
         )
 
     def handle_city_callback(self, user, chat_id: int, cb_data: str):
-        from .tasks import send_message_task, send_key_message_task
+        from .tasks import send_message_task
         from config.models import City
         try:
             city_id = int(cb_data.split("_")[1])
@@ -681,7 +736,7 @@ class BotHandlers:
             return
         user.city = city
         user.save(update_fields=["city"])
-        send_key_message_task.delay(
+        self._edit_or_send_key(
             chat_id=chat_id,
             text="چند سالته؟ 🐣",
             reply_markup=self.bot.get_age_menu(),
@@ -961,7 +1016,6 @@ class BotHandlers:
     # ══════════════════════════════════════════════════════════════════════════
 
     def handle_wallet(self, user, chat_id: int):
-        from .tasks import send_key_message_task
         coins  = user.get_wallet_balance()
         tomans = user.get_toman_balance()
         text = (
@@ -975,7 +1029,7 @@ class BotHandlers:
             f"• چت ناشناس «فرقی نمیکند»: رایگان 🆓\n\n"
             f"🎁 هر معرفی موفق: +{REFERRAL_REWARD_TOMANS:,} تومان"
         )
-        send_key_message_task.delay(
+        self._edit_or_send_key(
             chat_id=chat_id,
             text=text,
             reply_markup=self.bot.get_wallet_menu(),
@@ -1010,11 +1064,16 @@ class BotHandlers:
             for t in toman_txns:
                 lines.append(f"  ➕ {t.amount:,} تومان — {t.description or ''}")
 
-        send_message_task.delay(chat_id=chat_id, text="\n".join(lines))
+        self._edit_or_send_key(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            reply_markup={"inline_keyboard": [[
+                {"text": "🔙 بازگشت به کیف پول", "callback_data": "show_wallet"}
+            ]]},
+        )
 
     def handle_topup(self, user, chat_id: int):
-        from .tasks import send_key_message_task
-        send_key_message_task.delay(
+        self._edit_or_send_key(
             chat_id=chat_id,
             text="💳 یک بسته شارژ انتخاب کن:",
             reply_markup=self.bot.get_topup_menu(),
@@ -1048,7 +1107,13 @@ class BotHandlers:
             f"awaiting_receipt_{tomans}_{coins}",
             timeout=USER_STATE_TTL,
         )
-        send_message_task.delay(chat_id=chat_id, text=text)
+        self._edit_or_send_key(
+            chat_id=chat_id,
+            text=text,
+            reply_markup={"inline_keyboard": [[
+                {"text": "🔙 بازگشت به کیف پول", "callback_data": "show_wallet"}
+            ]]},
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Active chat forwarding
@@ -1080,6 +1145,37 @@ class BotHandlers:
         # ── Forward the message — no extra keyboard (reply keyboard persists) ─
         friend = session.user2 if session.user1 == user else session.user1
         send_message_task.delay(chat_id=friend.bale_id, text=text)
+
+        # ── Log a copy for report history (last-10-messages context) ─────────
+        self._log_chat_message(user, friend, session, text)
+
+    def _log_chat_message(self, sender, receiver, session, text: str):
+        """
+        Saves a copy of a forwarded chat message so that if either party is
+        reported later, the admin can review the recent conversation context.
+        Sequence number is per-session, generated via a Redis counter so
+        concurrent sends from both sides never collide.
+        """
+        from chat.models import Message
+
+        seq_key = f"msg_seq:{session.id}"
+        if cache.get(seq_key) is None:
+            cache.set(seq_key, 0, timeout=86_400)
+        seq = cache.incr(seq_key)
+
+        try:
+            Message.objects.create(
+                sender=sender,
+                receiver=receiver,
+                chat=session,
+                message_id=seq,
+                user_chat_id=sender.bale_id,
+                text=text[:4000],   # guard against absurdly long pastes
+                type=1,             # شخصی — direct/private message
+                is_success=True,
+            )
+        except Exception:
+            logger.exception("Failed to log chat message for session %s", session.id)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Search — shared pagination engine
@@ -1279,7 +1375,7 @@ class BotHandlers:
 
         full_text = "\n".join(header_lines) + "\n" + f"\n{DIVIDER}\n".join(user_blocks)
 
-        send_key_message_task.delay(
+        self._edit_or_send_key(
             chat_id=chat_id,
             text=full_text,
             reply_markup={"inline_keyboard": keyboard},
@@ -1306,7 +1402,6 @@ class BotHandlers:
         """Step 1 of featured search: user picked gender preference.
         Choosing boys/girls costs GENDER_FILTER_COST coins; 'any' is free.
         """
-        from .tasks import send_key_message_task, send_message_task
         gender = cb_data.replace("fs_g_", "")  # any | boys | girls
 
         if gender != "any":
@@ -1314,7 +1409,7 @@ class BotHandlers:
                 return  # insufficient balance — message already sent by _check_and_deduct
 
         cache.set(f"fs_pending:{chat_id}", {"gender": gender, "age_filter": "any"}, timeout=600)
-        send_key_message_task.delay(
+        self._edit_or_send_key(
             chat_id=chat_id,
             text="📍 کجا دنبال آشنا می‌گردی؟",
             reply_markup=self.bot.get_fs_location_menu(age_active=False),
@@ -1335,14 +1430,13 @@ class BotHandlers:
 
     def handle_fs_age_toggle(self, user, chat_id: int):
         """Toggle the ±5-year age filter ON/OFF inside the location keyboard."""
-        from .tasks import send_key_message_task
         pending    = cache.get(f"fs_pending:{chat_id}") or {}
         current    = pending.get("age_filter", "any")
         new_filter = "same" if current == "any" else "any"
         pending["age_filter"] = new_filter
         cache.set(f"fs_pending:{chat_id}", pending, timeout=600)
-        # Re-send the SAME location step with updated toggle label
-        send_key_message_task.delay(
+        # Edit the SAME message — just flips the toggle label, no new message
+        self._edit_or_send_key(
             chat_id=chat_id,
             text="📍 کجا دنبال آشنا می‌گردی؟",
             reply_markup=self.bot.get_fs_location_menu(age_active=(new_filter == "same")),
@@ -1451,6 +1545,30 @@ class BotHandlers:
         else:
             send_key_message_task.delay(chat_id=chat_id, text=card, reply_markup=markup)
 
+    def _refresh_profile_in_place(self, user, chat_id: int, target):
+        """
+        Re-renders a profile card by EDITING the message that was just
+        tapped (like/follow/block toggle) instead of sending a new one.
+        Safe to assume the message type (photo vs text) is unchanged since
+        we're re-showing the exact same target's card, not navigating to a
+        different one.
+        """
+        from user.models import ProfileLike, ProfileFollow, UserBlock
+
+        is_liked     = ProfileLike.objects.filter(liker=user, liked=target).exists()
+        is_following = ProfileFollow.objects.filter(follower=user, following=target).exists()
+        is_blocked   = UserBlock.objects.filter(blocker=user, blocked=target).exists()
+
+        card   = BaleBotService.format_profile_card(target, header="👤 پروفایل کاربر", show_stats=True)
+        markup = self.bot.get_user_profile_actions_menu(
+            target.bale_id, is_liked, is_following, is_blocked
+        )
+
+        if target.photo_file_id:
+            self._edit_or_send_caption(chat_id, card, markup, file_id=target.photo_file_id)
+        else:
+            self._edit_or_send_key(chat_id, card, markup)
+
     # ══════════════════════════════════════════════════════════════════════════
     # Like / Follow / Block
     # ══════════════════════════════════════════════════════════════════════════
@@ -1471,8 +1589,8 @@ class BotHandlers:
             like.delete()
             send_message_task.delay(chat_id=chat_id, text="💔 لایک برداشته شد")
 
-        # Refresh profile view with updated stats
-        self.handle_view_user_profile(user, chat_id, f"view_user_{target.bale_id}")
+        # Refresh the SAME profile message in place — no new message spam
+        self._refresh_profile_in_place(user, chat_id, target)
 
     def handle_follow_user(self, user, chat_id: int, cb_data: str):
         from .tasks import send_message_task
@@ -1490,7 +1608,7 @@ class BotHandlers:
             follow.delete()
             send_message_task.delay(chat_id=chat_id, text="➖ دنبال کردن لغو شد")
 
-        self.handle_view_user_profile(user, chat_id, f"view_user_{target.bale_id}")
+        self._refresh_profile_in_place(user, chat_id, target)
 
     def handle_block_user(self, user, chat_id: int, cb_data: str):
         from .tasks import send_message_task
@@ -1505,10 +1623,16 @@ class BotHandlers:
         if block:
             block.delete()
             send_message_task.delay(chat_id=chat_id, text="✅ مسدودی برداشته شد")
-            self.handle_view_user_profile(user, chat_id, f"view_user_{target.bale_id}")
+            self._refresh_profile_in_place(user, chat_id, target)
         else:
             UserBlock.objects.create(blocker=user, blocked=target)
-            send_message_task.delay(chat_id=chat_id, text="🚫 کاربر مسدود شد")
+            # Blocking removes all action buttons — edit the card into a
+            # simple "blocked" state instead of leaving stale buttons.
+            simple_text = f"🚫 {target.first_name or 'این کاربر'} مسدود شد."
+            if target.photo_file_id:
+                self._edit_or_send_caption(chat_id, simple_text, reply_markup=None, file_id=target.photo_file_id)
+            else:
+                self._edit_or_send_key(chat_id, simple_text, reply_markup=None)
             self.send_main_menu(chat_id)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -2091,10 +2215,15 @@ class BotHandlers:
         )
 
     def handle_report_reason(self, reporter, chat_id: int, cb_data: str):
-        """User picked a reason — create the Report record and notify admin."""
+        """
+        User picked a reason — create the Report record, then send the admin
+        ONE message containing the last 10 messages of the conversation plus
+        both users' info and two action buttons: ban (Bale API + internal)
+        and block (internal only).
+        """
         from .tasks import send_message_task
         from user.models import UserProfile, Report, REPORT_REASON_LABELS
-        from chat.models import ChatSession
+        from chat.models import ChatSession, Message
         from config.consts import ASGHAR_BALE_ID
 
         pending = cache.get(f"report_target_{chat_id}")
@@ -2132,16 +2261,158 @@ class BotHandlers:
             text="✅ گزارش شما ثبت شد. تیم پشتیبانی بررسی می‌کنه. ممنون از همکاریت 🙏",
         )
 
-        if ASGHAR_BALE_ID:
-            send_message_task.delay(
-                chat_id=ASGHAR_BALE_ID,
-                text=(
-                    f"🚨 گزارش جدید #{report.id}\n"
-                    f"دلیل: {reason_label}\n"
-                    f"گزارش‌دهنده: {reporter.first_name or '---'} (ID: {reporter.bale_id})\n"
-                    f"گزارش‌شده: {target.first_name or '---'} (ID: {target.bale_id}, @{target.referral_code or '---'})"
-                ),
+        if not ASGHAR_BALE_ID:
+            return
+
+        # ── Build last-10-messages transcript ─────────────────────────────────
+        history_lines = []
+        if session:
+            recent = list(
+                Message.objects.filter(chat=session).order_by("-created_at")[:10]
             )
+            recent.reverse()   # chronological order, oldest first
+            for m in recent:
+                sender_name = m.sender.first_name if m.sender else "؟"
+                snippet     = (m.text or "").replace("\n", " ")[:200]
+                history_lines.append(f"• {sender_name}: {snippet}")
+
+        history_block = (
+            "\n".join(history_lines)
+            if history_lines else
+            "(تاریخچه‌ای از پیام‌ها موجود نیست)"
+        )
+
+        admin_text = (
+            f"🚨 گزارش جدید #{report.id}\n"
+            f"دلیل: {reason_label}\n"
+            f"{'─' * 22}\n"
+            f"گزارش‌دهنده: {reporter.first_name or '---'} (ID: {reporter.bale_id}, @{reporter.referral_code or '---'})\n"
+            f"گزارش‌شده: {target.first_name or '---'} (ID: {target.bale_id}, @{target.referral_code or '---'})\n"
+            f"{'─' * 22}\n"
+            f"📝 آخرین {len(history_lines)} پیام گفتگو:\n"
+            f"{history_block}"
+        )
+
+        # Bale/Telegram caps message length around 4096 chars — truncate the
+        # transcript (not the header/footer) if needed so the buttons never
+        # get dropped for being attached to an oversized message.
+        MAX_LEN = 3800
+        if len(admin_text) > MAX_LEN:
+            admin_text = admin_text[:MAX_LEN] + "\n…(بریده شد)"
+
+        from .tasks import send_key_message_task
+        send_key_message_task.delay(
+            chat_id=ASGHAR_BALE_ID,
+            text=admin_text,
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "⛔ بن کامل (کانال‌ها + ربات)", "callback_data": f"admin_ban_{target.bale_id}"}],
+                    [{"text": "🚫 فقط مسدود در ربات",          "callback_data": f"admin_block_{target.bale_id}"}],
+                    [{"text": "✅ رفع مسدودی",                  "callback_data": f"admin_unban_{target.bale_id}"}],
+                ]
+            },
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Admin: ban / block from report action buttons
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def handle_admin_ban(self, user, chat_id: int, cb_data: str):
+        """
+        Full ban: kicks the user from every configured SupportChannel via
+        Bale's banChatMember API, AND sets is_banned=True so the bot itself
+        also rejects them on the next webhook.
+        """
+        from .tasks import send_message_task
+        from user.models import UserProfile
+        from config.consts import ASGHAR_BALE_ID
+
+        if chat_id != ASGHAR_BALE_ID:
+            send_message_task.delay(chat_id=chat_id, text="⛔ دسترسی مجاز نیست.")
+            return
+
+        try:
+            target_id = int(cb_data.replace("admin_ban_", ""))
+            target    = UserProfile.objects.get(bale_id=target_id)
+        except (UserProfile.DoesNotExist, ValueError):
+            send_message_task.delay(chat_id=chat_id, text="❌ کاربر پیدا نشد")
+            return
+
+        target.is_banned = True
+        target.save(update_fields=["is_banned"])
+
+        channel_count = self.bot.ban_user_from_all_channels(target_id)
+
+        self._edit_or_send_key(
+            chat_id=chat_id,
+            text=(
+                f"⛔ کاربر {target.first_name or target_id} (ID: {target_id}) بن شد.\n"
+                f"📡 از {channel_count} کانال اسپانسر مسدود شد.\n"
+                f"🤖 دسترسی به ربات هم قطع شد."
+            ),
+            reply_markup={"inline_keyboard": [[
+                {"text": "✅ رفع مسدودی", "callback_data": f"admin_unban_{target_id}"}
+            ]]},
+        )
+
+    def handle_admin_block(self, user, chat_id: int, cb_data: str):
+        """Soft block: only sets is_banned=True — no channel kick."""
+        from .tasks import send_message_task
+        from user.models import UserProfile
+        from config.consts import ASGHAR_BALE_ID
+
+        if chat_id != ASGHAR_BALE_ID:
+            send_message_task.delay(chat_id=chat_id, text="⛔ دسترسی مجاز نیست.")
+            return
+
+        try:
+            target_id = int(cb_data.replace("admin_block_", ""))
+            target    = UserProfile.objects.get(bale_id=target_id)
+        except (UserProfile.DoesNotExist, ValueError):
+            send_message_task.delay(chat_id=chat_id, text="❌ کاربر پیدا نشد")
+            return
+
+        target.is_banned = True
+        target.save(update_fields=["is_banned"])
+
+        self._edit_or_send_key(
+            chat_id=chat_id,
+            text=f"🚫 کاربر {target.first_name or target_id} (ID: {target_id}) فقط در ربات مسدود شد.",
+            reply_markup={"inline_keyboard": [[
+                {"text": "✅ رفع مسدودی", "callback_data": f"admin_unban_{target_id}"}
+            ]]},
+        )
+
+    def handle_admin_unban(self, user, chat_id: int, cb_data: str):
+        """Reverses both the internal block and the channel-level ban."""
+        from .tasks import send_message_task
+        from user.models import UserProfile
+        from config.consts import ASGHAR_BALE_ID
+
+        if chat_id != ASGHAR_BALE_ID:
+            send_message_task.delay(chat_id=chat_id, text="⛔ دسترسی مجاز نیست.")
+            return
+
+        try:
+            target_id = int(cb_data.replace("admin_unban_", ""))
+            target    = UserProfile.objects.get(bale_id=target_id)
+        except (UserProfile.DoesNotExist, ValueError):
+            send_message_task.delay(chat_id=chat_id, text="❌ کاربر پیدا نشد")
+            return
+
+        target.is_banned = False
+        target.save(update_fields=["is_banned"])
+
+        channel_count = self.bot.unban_user_from_all_channels(target_id)
+
+        self._edit_or_send_key(
+            chat_id=chat_id,
+            text=(
+                f"✅ کاربر {target.first_name or target_id} (ID: {target_id}) رفع مسدودی شد.\n"
+                f"📡 از {channel_count} کانال اسپانسر رفع مسدودی شد."
+            ),
+            reply_markup=None,
+        )
 
     def handle_fallback(self, chat_id: int, user, received_text):
         from .tasks import send_message_task

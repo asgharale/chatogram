@@ -57,12 +57,14 @@ def process_webhook_task(self, raw_data: dict):
         contact   = message.get("contact")
         photo     = message.get("photo")
         cb_data   = None
+        cb_message_id = None
         from_user = message.get("from_user") or chat
     else:
         msg       = callback.get("message") or {}
         chat      = msg.get("chat") or {}
         chat_id   = chat.get("id")
         cb_data   = callback.get("data")
+        cb_message_id = msg.get("message_id")
         text      = None
         contact   = None
         photo     = None
@@ -184,7 +186,7 @@ def process_webhook_task(self, raw_data: dict):
         return
 
     try:
-        handlers.dispatch(user, chat_id, text, contact, photo, cb_data)
+        handlers.dispatch(user, chat_id, text, contact, photo, cb_data, message_id=cb_message_id)
     except Exception as exc:
         logger.exception("process_webhook: unhandled error for chat_id=%s", chat_id)
         raise self.retry(exc=exc, countdown=5)
@@ -218,6 +220,43 @@ def send_key_message_task(self, chat_id: int, text: str, reply_markup: dict, par
     from .services import BaleBotService
     if BaleBotService().send_key_message(chat_id, text, reply_markup, parse_mode) is None:
         raise self.retry(countdown=5 * (2 ** self.request.retries))
+
+
+@shared_task(
+    bind=True,
+    queue="fast",
+    max_retries=2,
+    default_retry_delay=3,
+    name="external.tasks.edit_message_task",
+)
+def edit_message_task(self, chat_id: int, message_id: int, text: str,
+                       reply_markup: dict = None, parse_mode: str = None):
+    """
+    Edits an existing message in place (text + buttons) instead of sending a
+    new one. Used for menu navigation / pagination so the chat doesn't fill
+    up with duplicate menu messages.
+    Low retry count — if the edit fails (message too old, deleted, or
+    content unchanged), it's not worth retrying aggressively.
+    """
+    from .services import BaleBotService
+    result = BaleBotService().edit_message(chat_id, message_id, text, reply_markup, parse_mode)
+    if result is None:
+        raise self.retry(countdown=3 * (2 ** self.request.retries))
+
+
+@shared_task(
+    bind=True,
+    queue="fast",
+    max_retries=2,
+    default_retry_delay=3,
+    name="external.tasks.edit_caption_task",
+)
+def edit_caption_task(self, chat_id: int, message_id: int, caption: str, reply_markup: dict = None):
+    """Same as edit_message_task but for photo-caption messages (profile cards with a photo)."""
+    from .services import BaleBotService
+    result = BaleBotService().edit_message_caption(chat_id, message_id, caption, reply_markup)
+    if result is None:
+        raise self.retry(countdown=3 * (2 ** self.request.retries))
 
 
 @shared_task(

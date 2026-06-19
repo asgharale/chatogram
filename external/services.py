@@ -226,6 +226,68 @@ class BaleBotService:
     def get_chat_member(self, channel_id, user_id):
         return self.send("getChatMember", {"chat_id": channel_id, "user_id": user_id})
 
+    # ── Edit-in-place ────────────────────────────────────────────────────────
+    # Used to update an existing message instead of sending a new one —
+    # gives a cleaner, app-native feel for menu navigation / pagination.
+
+    def edit_message(self, chat_id: int, message_id: int, text: str,
+                      reply_markup: dict = None, parse_mode: str = None):
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        return self.send("editMessageText", payload)
+
+    def edit_message_caption(self, chat_id: int, message_id: int, caption: str,
+                              reply_markup: dict = None):
+        payload = {"chat_id": chat_id, "message_id": message_id, "caption": caption}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self.send("editMessageCaption", payload)
+
+    def edit_message_reply_markup(self, chat_id: int, message_id: int, reply_markup: dict):
+        return self.send("editMessageReplyMarkup", {
+            "chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup,
+        })
+
+    # ── Ban / unban (Bale Bot API — chat/channel-scoped) ───────────────────────
+    # Bale's banChatMember/unbanChatMember operate on a specific group or
+    # channel the bot administers — there is no "ban from the bot" endpoint
+    # for a private 1:1 chat. We apply it to every configured SupportChannel
+    # so a banned user also loses access to the sponsor channels, in addition
+    # to the bot's own internal `UserProfile.is_banned` flag (checked on every
+    # webhook in tasks.py) which blocks them from using the bot itself.
+
+    def ban_chat_member(self, channel_id, user_id: int):
+        return self.send("banChatMember", {"chat_id": channel_id, "user_id": user_id})
+
+    def unban_chat_member(self, channel_id, user_id: int, only_if_banned: bool = True):
+        return self.send("unbanChatMember", {
+            "chat_id": channel_id, "user_id": user_id, "only_if_banned": only_if_banned,
+        })
+
+    def ban_user_from_all_channels(self, user_id: int) -> int:
+        """Bans the user from every configured SupportChannel. Returns success count."""
+        count = 0
+        for ch in SupportChannel.objects.all():
+            if not ch.channel_id:
+                continue
+            result = self.ban_chat_member(ch.channel_id, user_id)
+            if result and result.get("ok"):
+                count += 1
+        return count
+
+    def unban_user_from_all_channels(self, user_id: int) -> int:
+        count = 0
+        for ch in SupportChannel.objects.all():
+            if not ch.channel_id:
+                continue
+            result = self.unban_chat_member(ch.channel_id, user_id, only_if_banned=True)
+            if result and result.get("ok"):
+                count += 1
+        return count
+
     # ── Support channel membership ─────────────────────────────────────────────
 
     def _raw_check_joined(self, chat_id: int) -> bool:
