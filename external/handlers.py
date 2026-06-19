@@ -219,6 +219,14 @@ class BotHandlers:
             elif cb_data.startswith("reject_chat_"):
                 self.handle_reject_chat(user, chat_id, cb_data)
 
+            # ── Reports ───────────────────────────────────────────────────────
+            elif cb_data.startswith("report_reason_"):
+                self.handle_report_reason(user, chat_id, cb_data)
+            elif cb_data == "report_cancel":
+                cache.delete(f"report_target_{chat_id}")
+                from .tasks import send_message_task
+                send_message_task.delay(chat_id=chat_id, text="❌ گزارش لغو شد")
+
             # ── Anonymous chat ────────────────────────────────────────────────
             elif cb_data == "start_new_chat":
                 self.handle_anon_chat(user, chat_id)
@@ -1047,16 +1055,31 @@ class BotHandlers:
     # ══════════════════════════════════════════════════════════════════════════
 
     def handle_active_chat(self, user, session, text: str = None):
-        from .tasks import send_key_message_task, send_message_task
-        if not text or not text.strip():
-            send_message_task.delay(chat_id=user.bale_id, text="پیام خالی نمیشه فرستاد 🙅")
+        from .tasks import send_message_task
+        chat_id = user.bale_id
+
+        # ── In-chat reply keyboard button taps ───────────────────────────────
+        if text == "❌ پایان چت":
+            self.handle_reject_chat(user, chat_id, f"reject_chat_{session.id}")
             return
+
+        if text == "👤 پروفایل طرف مقابل":
+            friend = session.user2 if session.user1 == user else session.user1
+            self._send_profile_card(chat_id, friend, "👤 پروفایل طرف مقابل", show_stats=True)
+            return
+
+        if text == "🚨 گزارش کاربر":
+            friend = session.user2 if session.user1 == user else session.user1
+            self.handle_report_start(user, friend, session)
+            return
+
+        if not text or not text.strip():
+            send_message_task.delay(chat_id=chat_id, text="پیام خالی نمیشه فرستاد 🙅")
+            return
+
+        # ── Forward the message — no extra keyboard (reply keyboard persists) ─
         friend = session.user2 if session.user1 == user else session.user1
-        send_key_message_task.delay(
-            chat_id=friend.bale_id,
-            text=text,
-            reply_markup=self.bot.get_in_session_menu(session),
-        )
+        send_message_task.delay(chat_id=friend.bale_id, text=text)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Search — shared pagination engine
@@ -1724,17 +1747,17 @@ class BotHandlers:
         session.save()
         self._invalidate_session_cache(chat_id, requester.bale_id)
 
-        end_menu  = self.bot.get_in_session_menu(session)
-        start_msg = "✅ چت شروع شد! پروفایل طرف مقابل 👇\nبرای پایان چت از دکمه زیر استفاده کن."
+        kb        = self.bot.in_chat_reply_keyboard
+        start_msg = "✅ چت شروع شد! پروفایل طرف مقابل 👇"
 
-        self._send_profile_card(chat_id, requester, start_msg, end_menu)
-        send_key_message_task.delay(chat_id=chat_id, text="پیام بفرست 💬", reply_markup=end_menu)
+        self._send_profile_card(chat_id, requester, start_msg, kb)
+        send_key_message_task.delay(chat_id=chat_id, text="پیام بفرست 💬", reply_markup=kb)
         self._send_profile_card(
             requester.bale_id, user,
             f"🎉 {user.first_name or 'کاربر'} درخواستت رو قبول کرد!\n{start_msg}",
-            end_menu,
+            kb,
         )
-        send_key_message_task.delay(chat_id=requester.bale_id, text="پیام بفرست 💬", reply_markup=end_menu)
+        send_key_message_task.delay(chat_id=requester.bale_id, text="پیام بفرست 💬", reply_markup=kb)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Reject / end chat
@@ -1835,15 +1858,13 @@ class BotHandlers:
                 session  = ChatSession.objects.create(user1=user2, user2=user, status=1)
                 self._invalidate_session_cache(chat_id, waiting_id)
 
-                end_menu  = {"inline_keyboard": [[
-                    {"text": "پایان چت ❌", "callback_data": f"reject_chat_{session.id}"}
-                ]]}
+                kb        = self.bot.in_chat_reply_keyboard
                 start_msg = "🎉 یه نفر پیدا شد! چت ناشناس شروع شد.\nپروفایل طرف مقابل 👇"
 
-                self._send_profile_card(chat_id, user2, start_msg, end_menu)
-                send_key_message_task.delay(chat_id=chat_id, text="پیام بفرست 💬", reply_markup=end_menu)
-                self._send_profile_card(waiting_id, user, start_msg, end_menu)
-                send_key_message_task.delay(chat_id=waiting_id, text="پیام بفرست 💬", reply_markup=end_menu)
+                self._send_profile_card(chat_id, user2, start_msg, kb)
+                send_key_message_task.delay(chat_id=chat_id, text="پیام بفرست 💬", reply_markup=kb)
+                self._send_profile_card(waiting_id, user, start_msg, kb)
+                send_key_message_task.delay(chat_id=waiting_id, text="پیام بفرست 💬", reply_markup=kb)
                 return
 
         if self.bot.is_in_queue(chat_id, pref):
@@ -2038,6 +2059,87 @@ class BotHandlers:
                     f"🔖 @{user.referral_code or '---'}\n"
                     f"🪙 {coins:,} سکه  →  💵 {tomans:,} تومان\n"
                     f"💳 شماره کارت: {card}"
+                ),
+            )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Reports
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def handle_report_start(self, reporter, target, session=None):
+        """Triggered from the in-chat '🚨 گزارش کاربر' reply-keyboard button."""
+        from .tasks import send_key_message_task
+        chat_id = reporter.bale_id
+        cache.set(
+            f"report_target_{chat_id}",
+            {"target_id": target.bale_id, "session_id": session.id if session else None},
+            timeout=600,
+        )
+        name = target.first_name or f"@{target.referral_code or target.bale_id}"
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text=f"🚨 گزارش {name}\nدلیل گزارش رو انتخاب کن:",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🔞 محتوای نامناسب", "callback_data": "report_reason_0"}],
+                    [{"text": "😡 آزار و اذیت",     "callback_data": "report_reason_1"}],
+                    [{"text": "💸 کلاهبرداری",      "callback_data": "report_reason_2"}],
+                    [{"text": "❓ سایر",             "callback_data": "report_reason_3"}],
+                    [{"text": "❌ انصراف",           "callback_data": "report_cancel"}],
+                ]
+            },
+        )
+
+    def handle_report_reason(self, reporter, chat_id: int, cb_data: str):
+        """User picked a reason — create the Report record and notify admin."""
+        from .tasks import send_message_task
+        from user.models import UserProfile, Report, REPORT_REASON_LABELS
+        from chat.models import ChatSession
+        from config.consts import ASGHAR_BALE_ID
+
+        pending = cache.get(f"report_target_{chat_id}")
+        if not pending:
+            send_message_task.delay(chat_id=chat_id, text="⌛ این گزارش منقضی شده. دوباره تلاش کن.")
+            return
+
+        try:
+            reason = int(cb_data.replace("report_reason_", ""))
+        except ValueError:
+            reason = 3
+
+        try:
+            target = UserProfile.objects.get(bale_id=pending["target_id"])
+        except UserProfile.DoesNotExist:
+            cache.delete(f"report_target_{chat_id}")
+            send_message_task.delay(chat_id=chat_id, text="❌ کاربر پیدا نشد")
+            return
+
+        session = None
+        if pending.get("session_id"):
+            session = ChatSession.objects.filter(pk=pending["session_id"]).first()
+
+        report = Report.objects.create(
+            reporter=reporter,
+            reported=target,
+            chat_session=session,
+            reason=reason,
+        )
+        cache.delete(f"report_target_{chat_id}")
+
+        reason_label = REPORT_REASON_LABELS[reason] if reason < len(REPORT_REASON_LABELS) else "سایر"
+        send_message_task.delay(
+            chat_id=chat_id,
+            text="✅ گزارش شما ثبت شد. تیم پشتیبانی بررسی می‌کنه. ممنون از همکاریت 🙏",
+        )
+
+        if ASGHAR_BALE_ID:
+            send_message_task.delay(
+                chat_id=ASGHAR_BALE_ID,
+                text=(
+                    f"🚨 گزارش جدید #{report.id}\n"
+                    f"دلیل: {reason_label}\n"
+                    f"گزارش‌دهنده: {reporter.first_name or '---'} (ID: {reporter.bale_id})\n"
+                    f"گزارش‌شده: {target.first_name or '---'} (ID: {target.bale_id}, @{target.referral_code or '---'})"
                 ),
             )
 

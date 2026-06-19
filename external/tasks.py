@@ -134,6 +134,15 @@ def process_webhook_task(self, raw_data: dict):
         UserProfile.objects.filter(bale_id=chat_id).update(last_seen_at=_tz.now())
         cache.set(ls_throttle_key, 1, timeout=1800)
 
+    # ── 3c. Ban check ──────────────────────────────────────────────────────────
+    if user.is_banned:
+        from .services import BaleBotService as _BotSvc
+        _BotSvc().send_message(
+            chat_id,
+            "⛔ حساب شما مسدود شده است.\nبرای اطلاعات بیشتر با پشتیبانی تماس بگیرید.",
+        )
+        return
+
     # ── 4. Dispatch ────────────────────────────────────────────────────────────
     bot      = BaleBotService()
     handlers = BotHandlers(bot)

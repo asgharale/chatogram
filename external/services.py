@@ -106,6 +106,17 @@ class BaleBotService:
         "persistent":      True,
     }
 
+    # Shown as persistent reply keyboard during an active chat session.
+    # Replaces main_reply_keyboard for the duration of the chat.
+    in_chat_reply_keyboard = {
+        "keyboard": [
+            [{"text": "❌ پایان چت"}],
+            [{"text": "👤 پروفایل طرف مقابل"}, {"text": "🚨 گزارش کاربر"}],
+        ],
+        "resize_keyboard": True,
+        "persistent":      True,
+    }
+
     phone_keyboard = {
         "keyboard": [[{"text": "📱 ارسال شماره تلفن", "request_contact": True}]],
         "resize_keyboard":   True,

@@ -36,6 +36,7 @@ class UserProfile(BaseModel):
         related_name='referrals',
     )
     referral_rewarded = models.BooleanField(default=False)
+    is_banned         = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         db_table = 'UserProfiles'
@@ -351,3 +352,55 @@ class CoinWithdrawal(BaseModel):
             f"{self.user} — {self.coins:,} سکه → {self.tomans:,} تومان"
             f" ({self.get_status_display()})"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User reports
+# ─────────────────────────────────────────────────────────────────────────────
+
+REPORT_REASON_CHOICES = (
+    (0, "محتوای نامناسب"),
+    (1, "آزار و اذیت"),
+    (2, "کلاهبرداری"),
+    (3, "سایر"),
+)
+
+REPORT_STATUS_CHOICES = (
+    (0, "در انتظار بررسی"),
+    (1, "بررسی شده — اقدام شد"),
+    (2, "نادیده گرفته شده"),
+)
+
+REPORT_REASON_LABELS = ["محتوای نامناسب", "آزار و اذیت", "کلاهبرداری", "سایر"]
+
+
+class Report(BaseModel):
+    reporter     = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='reports_made'
+    )
+    reported     = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE, related_name='reports_received'
+    )
+    # nullable because the session may already be closed
+    chat_session = models.ForeignKey(
+        'chat.ChatSession', on_delete=models.SET_NULL, null=True, blank=True
+    )
+    reason      = models.PositiveSmallIntegerField(
+        choices=REPORT_REASON_CHOICES, default=3
+    )
+    description = models.TextField(blank=True, null=True)
+    status      = models.PositiveSmallIntegerField(
+        choices=REPORT_STATUS_CHOICES, default=0
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'Reports'
+        indexes  = [
+            models.Index(fields=['status']),
+            models.Index(fields=['reported']),
+        ]
+
+    def __str__(self):
+        label = REPORT_REASON_LABELS[self.reason] if self.reason < len(REPORT_REASON_LABELS) else "?"
+        return f"Report #{self.id} — {label} | {self.reporter} → {self.reported}"
