@@ -603,7 +603,7 @@ class BotHandlers:
             f"• معرفی موفق دوست: {REFERRAL_REWARD_TOMANS:,} تومان 💵\n\n"
             "─────────────────────\n"
             "🔖 لینک معرفی شما:\n"
-            f"`https://ble.ir/alochatbot?start={code}`\n\n"
+            f"https://ble.ir/alochatbot?start={code}\n\n"
             "❓ سؤال یا مشکل داری؟ با ادمین تماس بگیر."
         )
         send_message_task.delay(chat_id=chat_id, text=text, parse_mode="Markdown")
@@ -835,8 +835,8 @@ class BotHandlers:
             f"{'─' * 22}\n"
             f"📣 هر بار که دوستت از طریق لینک زیر وارد بشه\n"
             f"و پروفایلشو کامل کنه، {REFERRAL_REWARD_TOMANS:,} تومان به حسابت واریز می‌شه!\n\n"
-            f"🔗 لینک معرفی شما (برای کپی ضربه بزن):\n"
-            f"`https://ble.ir/alochatbot?start={code}`"
+            f"🔗 لینک معرفی شما (برای کپی از منوی پایین استفاده کنید):\n"
+            f"https://ble.ir/alochatbot?start={code}"
         )
         send_key_message_task.delay(
             chat_id=chat_id,
