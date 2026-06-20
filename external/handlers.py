@@ -69,7 +69,8 @@ class BotHandlers:
     # Main router
     # ══════════════════════════════════════════════════════════════════════════
 
-    def dispatch(self, user, chat_id: int, text, contact, photo, cb_data, message_id=None):
+    def dispatch(self, user, chat_id: int, text, contact, photo, cb_data, message_id=None,
+                 document=None, animation=None):
         from user.enums import GENDER_MAP
 
         # The message_id of the tapped button's message (callback path only).
@@ -102,6 +103,20 @@ class BotHandlers:
                     self._send_support_gate(chat_id)
                     return
                 self.handle_photo_message(user, chat_id, photo)
+                return
+
+            if document:
+                if not self.bot.is_joined_supporteds(chat_id):
+                    self._send_support_gate(chat_id)
+                    return
+                self.handle_document_message(user, chat_id, document)
+                return
+
+            if animation:
+                if not self.bot.is_joined_supporteds(chat_id):
+                    self._send_support_gate(chat_id)
+                    return
+                self.handle_animation_message(user, chat_id, animation)
                 return
 
             # ── Check for pending DM state BEFORE reply-keyboard dispatch ─────
@@ -226,6 +241,10 @@ class BotHandlers:
                 self.handle_accept_chat(user, chat_id, cb_data)
             elif cb_data.startswith("reject_chat_"):
                 self.handle_reject_chat(user, chat_id, cb_data)
+            elif cb_data.startswith("end_confirm_"):
+                self.handle_end_chat_confirmed(user, chat_id, cb_data)
+            elif cb_data.startswith("end_cancel_"):
+                self.handle_end_chat_cancelled(user, chat_id, cb_data)
 
             # ── Reports ───────────────────────────────────────────────────────
             elif cb_data.startswith("report_reason_"):
@@ -296,6 +315,18 @@ class BotHandlers:
                 self._send_support_gate(chat_id)
                 return
             self.handle_photo_message(user, chat_id, photo)
+
+        if document and text is None and cb_data is None:
+            if not self.bot.is_joined_supporteds(chat_id):
+                self._send_support_gate(chat_id)
+                return
+            self.handle_document_message(user, chat_id, document)
+
+        if animation and text is None and cb_data is None:
+            if not self.bot.is_joined_supporteds(chat_id):
+                self._send_support_gate(chat_id)
+                return
+            self.handle_animation_message(user, chat_id, animation)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Internal helpers
@@ -939,6 +970,46 @@ class BotHandlers:
 
         send_message_task.delay(chat_id=chat_id, text="متوجه نشدم این عکس برای چیه 🧐")
 
+    def handle_document_message(self, user, chat_id: int, document: dict):
+        """
+        Forwards a document/file to the active chat partner using only the
+        Bale-provided file_id — no download or re-upload through our server.
+        """
+        from .tasks import send_message_task, send_document_task
+
+        file_id = document.get("file_id") if isinstance(document, dict) else None
+        if not file_id:
+            send_message_task.delay(chat_id=chat_id, text="دریافت فایل با خطا مواجه شد ❗️")
+            return
+
+        active = self._get_active_session(user)
+        if active:
+            friend = active.user2 if active.user1 == user else active.user1
+            send_document_task.delay(chat_id=friend.bale_id, file_id=file_id)
+            return
+
+        send_message_task.delay(chat_id=chat_id, text="متوجه نشدم این فایل برای چیه 🧐")
+
+    def handle_animation_message(self, user, chat_id: int, animation: dict):
+        """
+        Forwards a GIF to the active chat partner using only the Bale-provided
+        file_id — no download or re-upload through our server.
+        """
+        from .tasks import send_message_task, send_animation_task
+
+        file_id = animation.get("file_id") if isinstance(animation, dict) else None
+        if not file_id:
+            send_message_task.delay(chat_id=chat_id, text="دریافت گیف با خطا مواجه شد ❗️")
+            return
+
+        active = self._get_active_session(user)
+        if active:
+            friend = active.user2 if active.user1 == user else active.user1
+            send_animation_task.delay(chat_id=friend.bale_id, file_id=file_id)
+            return
+
+        send_message_task.delay(chat_id=chat_id, text="متوجه نشدم این گیف برای چیه 🧐")
+
     # ══════════════════════════════════════════════════════════════════════════
     # Admin: deposit approve / reject
     # ══════════════════════════════════════════════════════════════════════════
@@ -1125,7 +1196,7 @@ class BotHandlers:
 
         # ── In-chat reply keyboard button taps ───────────────────────────────
         if text == "❌ پایان چت":
-            self.handle_reject_chat(user, chat_id, f"reject_chat_{session.id}")
+            self.handle_end_chat_confirm_prompt(user, chat_id, session)
             return
 
         if text == "👤 پروفایل طرف مقابل":
@@ -1176,6 +1247,35 @@ class BotHandlers:
             )
         except Exception:
             logger.exception("Failed to log chat message for session %s", session.id)
+
+    # ── End-chat confirmation ────────────────────────────────────────────────
+
+    def handle_end_chat_confirm_prompt(self, user, chat_id: int, session):
+        """User tapped '❌ پایان چت' — ask for confirmation before actually ending it."""
+        from .tasks import send_key_message_task
+        send_key_message_task.delay(
+            chat_id=chat_id,
+            text="❓ آیا از پایان دادن چت اطمینان دارید؟",
+            reply_markup={
+                "inline_keyboard": [[
+                    {"text": "✅ تایید", "callback_data": f"end_confirm_{session.id}"},
+                    {"text": "❌ کنسل",  "callback_data": f"end_cancel_{session.id}"},
+                ]]
+            },
+        )
+
+    def handle_end_chat_confirmed(self, user, chat_id: int, cb_data: str):
+        """User tapped تایید — actually end the session now."""
+        session_id = cb_data.replace("end_confirm_", "")
+        self.handle_reject_chat(user, chat_id, f"reject_chat_{session_id}")
+
+    def handle_end_chat_cancelled(self, user, chat_id: int, cb_data: str):
+        """User tapped کنسل — dismiss the confirmation, chat continues."""
+        self._edit_or_send_key(
+            chat_id=chat_id,
+            text="✅ چت ادامه پیدا کرد.",
+            reply_markup=None,
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # Search — shared pagination engine

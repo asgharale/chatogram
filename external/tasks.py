@@ -56,6 +56,8 @@ def process_webhook_task(self, raw_data: dict):
         text      = message.get("text")
         contact   = message.get("contact")
         photo     = message.get("photo")
+        document  = message.get("document")
+        animation = message.get("animation")
         cb_data   = None
         cb_message_id = None
         from_user = message.get("from_user") or chat
@@ -68,15 +70,17 @@ def process_webhook_task(self, raw_data: dict):
         text      = None
         contact   = None
         photo     = None
+        document  = None
+        animation = None
         from_user = callback.get("from_user") or msg.get("chat") or {}
 
     if not chat_id:
         logger.warning("process_webhook: missing chat_id — skipping")
         return
 
-    first_name = from_user.get("first_name")
-    last_name  = from_user.get("last_name")
-    username   = from_user.get("username")
+    # NOTE: first_name/last_name from the Bale account are intentionally
+    # NOT extracted/stored — see comments below. Only username is synced.
+    username = from_user.get("username")
 
     # ── 3. Upsert UserProfile ──────────────────────────────────────────────────
     # FIX 7: Skip the get_or_create write for users seen in the last 5 minutes.
@@ -95,9 +99,12 @@ def process_webhook_task(self, raw_data: dict):
             user, created = UserProfile.objects.get_or_create(
                 bale_id=chat_id,
                 defaults={
-                    "first_name": first_name,
-                    "last_name":  last_name,
-                    "username":   username,
+                    # first_name/last_name intentionally NOT set here —
+                    # the bot asks the user to choose their own in-app
+                    # display name during onboarding (handle_start /
+                    # handle_name_input). Pre-filling from their Bale
+                    # account name was skipping that step entirely.
+                    "username": username,
                 },
             )
             cache.set(upsert_cache_key, 1, timeout=300)
@@ -105,9 +112,7 @@ def process_webhook_task(self, raw_data: dict):
         user, created = UserProfile.objects.get_or_create(
             bale_id=chat_id,
             defaults={
-                "first_name": first_name,
-                "last_name":  last_name,
-                "username":   username,
+                "username": username,
             },
         )
         cache.set(upsert_cache_key, 1, timeout=300)   # cache for 5 min
@@ -115,9 +120,10 @@ def process_webhook_task(self, raw_data: dict):
         if not created:
             changed_fields = []
             for field, val in [
-                ("first_name", first_name),
-                ("last_name",  last_name),
-                ("username",   username),
+                # NOTE: first_name/last_name deliberately excluded — those
+                # are the user's chosen in-app display name and must never
+                # be silently overwritten by their Bale account name.
+                ("username", username),
             ]:
                 if val and getattr(user, field) != val:
                     setattr(user, field, val)
@@ -186,7 +192,8 @@ def process_webhook_task(self, raw_data: dict):
         return
 
     try:
-        handlers.dispatch(user, chat_id, text, contact, photo, cb_data, message_id=cb_message_id)
+        handlers.dispatch(user, chat_id, text, contact, photo, cb_data, message_id=cb_message_id,
+                           document=document, animation=animation)
     except Exception as exc:
         logger.exception("process_webhook: unhandled error for chat_id=%s", chat_id)
         raise self.retry(exc=exc, countdown=5)
@@ -269,6 +276,34 @@ def edit_caption_task(self, chat_id: int, message_id: int, caption: str, reply_m
 def send_photo_task(self, chat_id: int, file_id: str):
     from .services import BaleBotService
     if BaleBotService().send_photo(chat_id, file_id) is None:
+        raise self.retry(countdown=5 * (2 ** self.request.retries))
+
+
+@shared_task(
+    bind=True,
+    queue="fast",
+    max_retries=4,
+    default_retry_delay=5,
+    name="external.tasks.send_document_task",
+)
+def send_document_task(self, chat_id: int, file_id: str):
+    """Relays a document by file_id — no local download/re-upload involved."""
+    from .services import BaleBotService
+    if BaleBotService().send_document(chat_id, file_id) is None:
+        raise self.retry(countdown=5 * (2 ** self.request.retries))
+
+
+@shared_task(
+    bind=True,
+    queue="fast",
+    max_retries=4,
+    default_retry_delay=5,
+    name="external.tasks.send_animation_task",
+)
+def send_animation_task(self, chat_id: int, file_id: str):
+    """Relays a GIF by file_id — no local download/re-upload involved."""
+    from .services import BaleBotService
+    if BaleBotService().send_animation(chat_id, file_id) is None:
         raise self.retry(countdown=5 * (2 ** self.request.retries))
 
 

@@ -211,6 +211,14 @@ class BaleBotService:
     def send_photo(self, chat_id: int, file_id: str):
         return self.send("sendPhoto", {"chat_id": chat_id, "photo": file_id})
 
+    def send_document(self, chat_id: int, file_id: str):
+        """Relay a file by file_id only — no download/re-upload needed."""
+        return self.send("sendDocument", {"chat_id": chat_id, "document": file_id})
+
+    def send_animation(self, chat_id: int, file_id: str):
+        """Relay a GIF by file_id only — no download/re-upload needed."""
+        return self.send("sendAnimation", {"chat_id": chat_id, "animation": file_id})
+
     def send_photo_caption(
         self,
         chat_id: int,

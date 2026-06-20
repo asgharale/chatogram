@@ -62,6 +62,40 @@ class DocumentSerializer(serializers.Serializer):
     file_size = serializers.IntegerField(required=False, allow_null=True)
 
 
+class AnimationSerializer(serializers.Serializer):
+    """
+    GIFs (and short looping mp4s sent as GIFs) arrive as a Bale 'animation'
+    object — distinct from a generic document or video. We only need the
+    file_id to relay it: Bale lets us forward by file_id with no download/
+    re-upload required on our side.
+    """
+    file_id = serializers.CharField(required=False, allow_null=True)
+
+    file_unique_id = serializers.CharField(
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+        default=""
+    )
+
+    file_name = serializers.CharField(
+        required=False,
+        allow_null=True,
+        allow_blank=True
+    )
+
+    mime_type = serializers.CharField(
+        required=False,
+        allow_null=True,
+        allow_blank=True
+    )
+
+    width = serializers.IntegerField(required=False, allow_null=True)
+    height = serializers.IntegerField(required=False, allow_null=True)
+    duration = serializers.IntegerField(required=False, allow_null=True)
+    file_size = serializers.IntegerField(required=False, allow_null=True)
+
+
 class MessageSerializer(serializers.Serializer):
     message_id = serializers.BigIntegerField(required=False, allow_null=True)
 
@@ -76,6 +110,8 @@ class MessageSerializer(serializers.Serializer):
     from_user = UserSerializer(source="from", required=False, allow_null=True)
 
     document = DocumentSerializer(required=False, allow_null=True)
+
+    animation = AnimationSerializer(required=False, allow_null=True)
 
     photo = PhotoSizeSerializer(
         many=True,
