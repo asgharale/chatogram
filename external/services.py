@@ -507,9 +507,12 @@ class BaleBotService:
 
     def get_referral_menu(self, referral_code: str) -> dict:
         return {
-            "inline_keyboard": [
-                [{"text": "🔗 لینک اشتراک‌گذاری",  "callback_data": "show_share_link"}]
-            ]
+            "inline_keyboard": [[
+                {
+                    "text":          "📤 ارسال لینک معرفی",
+                    "callback_data": "share_referral_link",
+                }
+            ]]
         }
 
     def get_anon_gender_pref_menu(self) -> dict:
